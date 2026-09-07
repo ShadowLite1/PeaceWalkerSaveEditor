@@ -207,8 +207,8 @@ ASSIGNMENTS = {
     0x05: "Mess Hall Team",
     0x06: "Intel Team",
     0x07: "Trade Waiting Room",
-    0x08: "Sickbay",
-    0x09: "Brig",
+    0x08: "Brig",
+    0x09: "Sickbay",
 }
 
 
