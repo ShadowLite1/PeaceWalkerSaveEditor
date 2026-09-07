@@ -61,6 +61,7 @@ GRADE_CHOICES = [f"{value:02X} — {GRADE_NAMES[value]}" for value in range(5, -
 TEAM_GRADE_MINIMUM_SCORES = {-1: 0, 0: 1, 1: 100, 2: 200, 3: 500, 4: 750, 5: 1001}
 BATTLE_GRADE_MINIMUM_SCORES = {0: 0, 1: 209, 2: 417, 3: 626, 4: 834, 5: 1042}
 BATTLE_SCORE_MAX = 1250
+VITAL_STAT_MAX = 9999
 
 KNOWN_SKILLS = {
     0x00: "None",
@@ -287,6 +288,14 @@ def parse_stat(value: str, label: str, maximum: int = 9999) -> int:
     return number
 
 
+def capped_vital_text(value: str) -> str:
+    """Clamp numeric Life/Psyche input without interfering with normal editing."""
+    stripped = value.strip()
+    if stripped.isdecimal() and int(stripped) > VITAL_STAT_MAX:
+        return str(VITAL_STAT_MAX)
+    return value
+
+
 def parse_hex_byte(value: str, label: str) -> int:
     text = value.strip().removeprefix("0x").removeprefix("0X")
     try:
@@ -483,6 +492,8 @@ class SoldierEditor(tk.Tk):
         self.life_var = tk.StringVar()
         self.psyche_var = tk.StringVar()
         self.gmp_var = tk.StringVar()
+        self.life_var.trace_add("write", lambda *_args: self._cap_vital_stat(self.life_var))
+        self.psyche_var.trace_add("write", lambda *_args: self._cap_vital_stat(self.psyche_var))
         for row, (label, variable) in enumerate((("LIFE", self.life_var), ("PSYCHE", self.psyche_var))):
             tk.Label(stats, text=label, bg=RED, fg="white", width=10, anchor="w", padx=7,
                      font=("Segoe UI", 11, "bold")).grid(row=row, column=0, sticky="ew", pady=1)
@@ -549,6 +560,13 @@ class SoldierEditor(tk.Tk):
     def _row(parent, row: int, label: str, widget) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 14))
         widget.grid(row=row, column=1, sticky="w", pady=5)
+
+    @staticmethod
+    def _cap_vital_stat(variable: tk.StringVar) -> None:
+        value = variable.get()
+        capped = capped_vital_text(value)
+        if capped != value:
+            variable.set(capped)
 
     def _show_skill_description(self, index: int = 0) -> None:
         if not 0 <= index < len(self.skill_vars):

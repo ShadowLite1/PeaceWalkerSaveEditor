@@ -8,6 +8,7 @@ PTB means public test build. Back up your save before editing it.
 
 - Opens and saves encrypted PC `STW` save files.
 - Edits soldier names, assignments, portraits, classes, recruitment categories, sex, Life, Psyche, GMP+, Combat, R&D, Mess Hall, Medical, Intel, skills, and Details Quotes.
+- Automatically caps Life and Psyche at the game's maximum value of 9,999.
 - Shows skill descriptions.
 - Filters and searches the staff roster, including unique characters.
 - Exports a soldier and imports one into an empty roster slot from the right-click menu.
