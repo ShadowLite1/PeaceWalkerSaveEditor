@@ -31,6 +31,15 @@ Requirements:
 
 - Windows 10 or 11
 - Python 3.11 or newer
+- Visual Studio 2022 with the **Python development** workload when building through Visual Studio
+
+### Visual Studio 2022
+
+1. Open **Visual Studio Installer**.
+2. Select **Modify** for your Visual Studio installation.
+3. Install the **Python development** workload.
+4. In Visual Studio, select **File > Open > Folder** and open this repository.
+5. Open **View > Terminal** and run the build commands below.
 
 From a PowerShell window in this repository:
 

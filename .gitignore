@@ -11,3 +11,4 @@ dist/
 *.pwsoldier
 .idea/
 .vscode/
+.vs/
