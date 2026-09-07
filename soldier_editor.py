@@ -18,8 +18,8 @@ ROSTER_COUNT_OFFSET = ROSTER_BASE - 0x10
 RECORD_SIZE = 0xA0
 RECORD_COUNT = 350
 SOLDIER_EXPORT_MAGIC = b"PWSOLDIER\x01"
-DESCRIPTION_KEY_OFFSET = 0x10
-DESCRIPTION_KEY_SIZE = 8
+DESCRIPTION_KEY_OFFSET = 0x14
+DESCRIPTION_KEY_SIZE = 4
 NAME_OFFSET = 0x20
 NAME_SIZE = 16
 ASSIGNMENT_OFFSET = 0x30
@@ -474,7 +474,7 @@ class SoldierEditor(tk.Tk):
         self.sex_box = ttk.Combobox(metadata, textvariable=self.sex_var, width=15, state="readonly")
         self.sex_box.grid(row=1, column=2, sticky="w", padx=(10, 0))
 
-        ttk.Label(metadata, text="Description profile (copied from an existing soldier)", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(metadata, text="Details Quote (copied from an existing soldier)", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.description_box = ttk.Combobox(metadata, textvariable=self.description_var, width=58, state="readonly")
         self.description_box.grid(row=3, column=0, columnspan=3, sticky="ew")
 

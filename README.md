@@ -7,7 +7,7 @@ PTB means public test build. Back up your save before editing it.
 ## Features
 
 - Opens and saves encrypted PC `STW` save files.
-- Edits soldier names, assignments, portraits, classes, recruitment categories, sex, Life, Psyche, GMP+, Combat, R&D, Mess Hall, Medical, Intel, and skills.
+- Edits soldier names, assignments, portraits, classes, recruitment categories, sex, Life, Psyche, GMP+, Combat, R&D, Mess Hall, Medical, Intel, skills, and Details Quotes.
 - Shows skill descriptions.
 - Filters and searches the staff roster, including unique characters.
 - Exports a soldier and imports one into an empty roster slot from the right-click menu.
@@ -24,6 +24,8 @@ PTB means public test build. Back up your save before editing it.
 7. After confirming the edited save works, replace the original if desired.
 
 For soldier transfers, right-click a populated roster entry and select **Export Soldier**. To import it, right-click an empty slot and select **Import Soldier**.
+
+The **Details Quote** selector copies only the four-byte quote identifier from the selected donor soldier. It does not copy the donor's separate identity data.
 
 ## Build from source
 
