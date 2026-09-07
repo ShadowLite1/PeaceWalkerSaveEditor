@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.STW
+*.stw
+*.backup
+*.bak
+*.pwsoldier
+.idea/
+.vscode/
