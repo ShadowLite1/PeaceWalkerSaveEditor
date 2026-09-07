@@ -46,7 +46,7 @@ From a PowerShell window in this repository:
 ```powershell
 py -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python -m PyInstaller --clean --noconfirm PeaceWalkerSoldierEditor_PTB_v11.spec
+.venv\Scripts\python -m PyInstaller --clean --noconfirm PeaceWalkerSoldierEditor.spec
 ```
 
 The standalone application will be created under:
@@ -63,7 +63,7 @@ The included portrait files are bundled automatically by the PyInstaller specifi
 - `save_cipher.py` — PC save encryption/decryption support
 - `edit_save.py` — internal save checksum updates
 - `portrait_assets/` — portrait images bundled with PTB v11
-- `PeaceWalkerSoldierEditor_PTB_v11.spec` — standalone Windows build configuration
+- `PeaceWalkerSoldierEditor.spec` — standalone Windows build configuration
 
 ## Important notes
 
