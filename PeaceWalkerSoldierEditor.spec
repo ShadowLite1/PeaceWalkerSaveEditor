@@ -29,7 +29,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PeaceWalkerSoldierEditor_PTB_v11",
+    name="PeaceWalkerSoldierEditor_PTB",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,5 +50,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="PeaceWalkerSoldierEditor_PTB_v11",
+    name="PeaceWalkerSoldierEditor_PTB",
 )
