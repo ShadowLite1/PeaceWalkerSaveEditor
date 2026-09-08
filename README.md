@@ -7,11 +7,14 @@ PTB means public test build. Back up your save before editing it.
 ## Features
 
 - Opens and saves encrypted PC `STW` save files.
-- Edits soldier names, assignments, portraits, classes, recruitment categories, sex, Life, Psyche, GMP+, Combat, R&D, Mess Hall, Medical, Intel, skills, and Details Quotes.
+- Edits soldier names, assignments, portraits, classes, recruitment categories, sex, unit title, voice profile, acquisition method, Life, Psyche, GMP+, Hostility, Morale, Combat, R&D, Mess Hall, Medical, Intel, skills, and Details Quotes.
 - Automatically caps Life and Psyche at the game's maximum value of 9,999.
+- Automatically caps Hostility and Morale at the soldier-record maximum of 999.
 - Shows skill descriptions.
+- Provides a Play button for each voice profile when its authentic preview WAV is included.
 - Filters and searches the staff roster, including unique characters.
 - Exports a soldier and imports one into an empty roster slot from the right-click menu.
+- Supports persistent per-soldier custom Details Quotes through an optional ASI plugin.
 - Includes the portrait pack used by the PTB release.
 
 ## Use the editor
@@ -28,13 +31,30 @@ For soldier transfers, right-click a populated roster entry and select **Export 
 
 The **Details Quote** selector copies only the four-byte quote identifier from the selected donor soldier. It does not copy the donor's separate identity data.
 
+The condition indicator is intentionally read-only. The save contains a compact condition flag used by sick or wounded staff, but its individual bit meanings are not yet safe to edit.
+
+### Voice previews
+
+Choose a Voice Profile and select **Play** to hear its bundled sample. Authentic preview files use the names `voice_01.wav` through `voice_09.wav` in the `voice_previews` folder. If a profile has not been captured yet, the editor reports that the preview is unavailable.
+
+### Custom Details Quotes
+
+1. Select a soldier and type text into **Custom Details Quote (optional)**.
+2. Choose **Apply Soldier Changes**, then **Save As**.
+3. Keep the generated `.pwquotes.json` file beside the edited save. It stores the custom text because arbitrary quote text cannot be embedded directly in the normal soldier record.
+4. Choose **Install Custom Quote Support** once and select the real Peace Walker executable. MGSPatriotFix or another compatible ASI loader must already be installed.
+5. Close the editor and start Peace Walker normally. The game-side plugin loads the matching companion file automatically.
+
+The save remains a standard Peace Walker save. If the companion file or plugin is missing, the game falls back to the selected donor quote. The plugin is specific to the supported PC executable and may need an update if a game patch changes its code layout.
+
 ## Build from source
 
 Requirements:
 
 - Windows 10 or 11
 - Python 3.11 or newer
-- Visual Studio 2022 with the **Python development** workload when building through Visual Studio
+- Visual Studio 2022 with the **Python development** workload
+- Visual Studio 2022 **Desktop development with C++** workload when rebuilding the optional quote plugin
 
 ### Visual Studio 2022
 
@@ -49,6 +69,7 @@ From a PowerShell window in this repository:
 ```powershell
 py -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
+quote_plugin\build_plugin.bat
 .venv\Scripts\python -m PyInstaller --clean --noconfirm PeaceWalkerSoldierEditor.spec
 ```
 
@@ -66,6 +87,8 @@ The included portrait files are bundled automatically by the PyInstaller specifi
 - `save_cipher.py` — PC save encryption/decryption support
 - `edit_save.py` — internal save checksum updates
 - `portrait_assets/` — portrait images bundled with the PTB release
+- `quote_plugin/` — source and build script for persistent game-side custom quote support
+- `third_party/minhook/` — MinHook source used by the optional ASI plugin
 - `PeaceWalkerSoldierEditor.spec` — standalone Windows build configuration
 
 ## Important notes
@@ -73,6 +96,7 @@ The included portrait files are bundled automatically by the PyInstaller specifi
 - This build is intended for the PC Master Collection release. Other releases may use a different save layout.
 - Never edit the only copy of a save.
 - The application does not need Python or separate DLL/PYC files when built with the included PyInstaller specification.
+- The standalone folder must be kept intact; do not move only the `.exe` out of it.
 - Antivirus products may scrutinize newly compiled unsigned executables. Publishing the source and reproducible build steps lets users inspect and build the program themselves.
 
 This is an unofficial fan-made utility and is not affiliated with or endorsed by Konami.

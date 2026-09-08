@@ -12,3 +12,6 @@ dist/
 .idea/
 .vscode/
 .vs/
+*.obj
+*.exp
+*.lib

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tkinter as tk
@@ -7,6 +8,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
+
+try:
+    import winsound
+except ImportError:  # pragma: no cover - the editor is distributed for Windows
+    winsound = None
 
 from edit_save import update_internal_checks
 from save_cipher import derive_state, filename_checksum, transform
@@ -28,6 +34,12 @@ PORTRAIT_SET_OFFSET = 0x3E
 SOLDIER_TYPE_OFFSET = 0x31
 SERVICE_TYPE_OFFSET = 0x18
 SEX_OFFSET = 0x34
+UNIT_TITLE_OFFSET = 0x32
+VOICE_OFFSET = 0x33
+CONDITION_FLAGS_OFFSET = 0x36
+HOSTILITY_OFFSET = 0x7E
+MORALE_OFFSET = 0x82
+ACQUISITION_METHOD_OFFSET = 0x8C
 SKILLS_OFFSET = 0x98
 SKILLS_SIZE = 8
 VISIBLE_SKILLS = 4
@@ -62,6 +74,9 @@ TEAM_GRADE_MINIMUM_SCORES = {-1: 0, 0: 1, 1: 100, 2: 200, 3: 500, 4: 750, 5: 100
 BATTLE_GRADE_MINIMUM_SCORES = {0: 0, 1: 209, 2: 417, 3: 626, 4: 834, 5: 1042}
 BATTLE_SCORE_MAX = 1250
 VITAL_STAT_MAX = 9999
+RELATION_STAT_MAX = 999
+CUSTOM_QUOTE_SIDECAR_SUFFIX = ".pwquotes.json"
+CUSTOM_QUOTE_MAX_BYTES = 511
 
 KNOWN_SKILLS = {
     0x00: "None",
@@ -199,6 +214,9 @@ SERVICE_TYPES = {
     0x08: "Military Soldier",
 }
 SEXES = {0x10: "Female", 0x11: "Male"}
+UNIT_TITLES = {value: f"Title {value}" for value in range(1, 7)}
+VOICES = {value: f"Voice {value}" for value in range(1, 10)}
+ACQUISITION_METHODS = {value: f"Method {value}" for value in range(10)}
 ASSIGNMENTS = {
     0x00: "Unassigned",
     0x01: "Waiting Room",
@@ -218,7 +236,7 @@ def enum_label(value: int, names: dict[int, str]) -> str:
 
 
 def enum_value(label: str, field: str) -> int:
-    for names in (ASSIGNMENTS, SOLDIER_TYPES, SERVICE_TYPES, SEXES):
+    for names in (ASSIGNMENTS, SOLDIER_TYPES, SERVICE_TYPES, SEXES, UNIT_TITLES, VOICES, ACQUISITION_METHODS):
         for value, name in names.items():
             if label == name:
                 return value
@@ -296,6 +314,14 @@ def capped_vital_text(value: str) -> str:
     return value
 
 
+def capped_relation_text(value: str) -> str:
+    """Clamp Morale/Hostility to the record's observed 0-999 range."""
+    stripped = value.strip()
+    if stripped.isdecimal() and int(stripped) > RELATION_STAT_MAX:
+        return str(RELATION_STAT_MAX)
+    return value
+
+
 def parse_hex_byte(value: str, label: str) -> int:
     text = value.strip().removeprefix("0x").removeprefix("0X")
     try:
@@ -319,21 +345,22 @@ class SoldierEditor(tk.Tk):
         self.header_index: int | None = None
         self.selected_slot: int | None = None
         self.description_slots: dict[str, int] = {}
+        self.custom_quotes: dict[int, str] = {}
         self.portrait_files: dict[int, Path] = {}
         self.portrait_files_by_code: dict[tuple[int, int], list[tuple[int, Path]]] = {}
         self.portrait_photo = None
         self.dirty = False
 
-        resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-        app_icon = resource_root / "app_icon.ico"
+        self.resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        app_icon = self.resource_root / "app_icon.ico"
         if app_icon.is_file():
             try:
                 self.iconbitmap(default=str(app_icon))
             except tk.TclError:
                 pass
         portrait_roots = [
-            resource_root / "portrait_assets",
-            resource_root / "extracted_runtime_txp" / "008ad7dc",
+            self.resource_root / "portrait_assets",
+            self.resource_root / "extracted_runtime_txp" / "008ad7dc",
         ]
         for portrait_root in portrait_roots:
             if portrait_root.is_dir():
@@ -455,6 +482,10 @@ class SoldierEditor(tk.Tk):
         self.soldier_type_var = tk.StringVar()
         self.service_type_var = tk.StringVar()
         self.sex_var = tk.StringVar()
+        self.unit_title_var = tk.StringVar()
+        self.voice_var = tk.StringVar()
+        self.acquisition_method_var = tk.StringVar()
+        self.condition_var = tk.StringVar(value="Normal")
         self.description_var = tk.StringVar()
         ttk.Entry(identity, textvariable=self.name_var, width=28, font=("Segoe UI", 18)).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(identity, text="Assignment", style="PW.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -483,23 +514,66 @@ class SoldierEditor(tk.Tk):
         self.sex_box = ttk.Combobox(metadata, textvariable=self.sex_var, width=15, state="readonly")
         self.sex_box.grid(row=1, column=2, sticky="w", padx=(10, 0))
 
-        ttk.Label(metadata, text="Details Quote (copied from an existing soldier)", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(metadata, text="Details Quote donor", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.description_box = ttk.Combobox(metadata, textvariable=self.description_var, width=58, state="readonly")
         self.description_box.grid(row=3, column=0, columnspan=3, sticky="ew")
-
+        ttk.Label(metadata, text="Unit title", style="PW.TLabel").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(metadata, text="Voice profile", style="PW.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
+        ttk.Label(metadata, text="Acquisition method", style="PW.TLabel").grid(row=4, column=2, sticky="w", padx=(10, 0), pady=(10, 0))
+        self.unit_title_box = ttk.Combobox(
+            metadata, textvariable=self.unit_title_var, values=list(UNIT_TITLES.values()), width=23, state="readonly"
+        )
+        self.unit_title_box.grid(row=5, column=0, sticky="w")
+        voice_controls = ttk.Frame(metadata, style="PW.TFrame")
+        voice_controls.grid(row=5, column=1, sticky="w", padx=(10, 0))
+        self.voice_box = ttk.Combobox(
+            voice_controls, textvariable=self.voice_var, values=list(VOICES.values()), width=15, state="readonly"
+        )
+        self.voice_box.pack(side="left")
+        ttk.Button(
+            voice_controls,
+            text="▶",
+            width=2,
+            style="PW.TButton",
+            command=self.play_voice_preview,
+        ).pack(side="left", padx=(5, 0))
+        self.acquisition_method_box = ttk.Combobox(
+            metadata,
+            textvariable=self.acquisition_method_var,
+            values=list(ACQUISITION_METHODS.values()),
+            width=15,
+            state="readonly",
+        )
+        self.acquisition_method_box.grid(row=5, column=2, sticky="w", padx=(10, 0))
+        ttk.Label(metadata, textvariable=self.condition_var, style="PW.TLabel").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(5, 0)
+        )
         stats = tk.Frame(card, bg=PANEL, padx=8, pady=8)
         stats.grid(row=2, column=1, sticky="ew", pady=(16, 0))
         self.life_var = tk.StringVar()
         self.psyche_var = tk.StringVar()
         self.gmp_var = tk.StringVar()
+        self.hostility_var = tk.StringVar()
+        self.morale_var = tk.StringVar()
         self.life_var.trace_add("write", lambda *_args: self._cap_vital_stat(self.life_var))
         self.psyche_var.trace_add("write", lambda *_args: self._cap_vital_stat(self.psyche_var))
+        self.hostility_var.trace_add("write", lambda *_args: self._cap_relation_stat(self.hostility_var))
+        self.morale_var.trace_add("write", lambda *_args: self._cap_relation_stat(self.morale_var))
         for row, (label, variable) in enumerate((("LIFE", self.life_var), ("PSYCHE", self.psyche_var))):
             tk.Label(stats, text=label, bg=RED, fg="white", width=10, anchor="w", padx=7,
                      font=("Segoe UI", 11, "bold")).grid(row=row, column=0, sticky="ew", pady=1)
             ttk.Entry(stats, textvariable=variable, width=9, justify="right").grid(row=row, column=1, padx=(2, 12), pady=1)
         tk.Label(stats, text="STORED BASE GMP+", bg=PANEL, fg=CREAM, font=("Segoe UI", 10, "bold")).grid(row=0, column=2)
         ttk.Entry(stats, textvariable=self.gmp_var, width=10, justify="right").grid(row=1, column=2)
+        for column, (label, variable) in enumerate(
+            (("HOSTILITY", self.hostility_var), ("MORALE", self.morale_var)), start=3
+        ):
+            tk.Label(stats, text=label, bg=PANEL, fg=CREAM, font=("Segoe UI", 10, "bold")).grid(
+                row=0, column=column, padx=(14, 0)
+            )
+            ttk.Entry(stats, textvariable=variable, width=8, justify="right").grid(
+                row=1, column=column, padx=(14, 0)
+            )
 
         parameters = tk.Frame(right, bg=BG)
         parameters.pack(fill="x", pady=(12, 0))
@@ -544,7 +618,42 @@ class SoldierEditor(tk.Tk):
             wraplength=900,
         )
         self.skill_description.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(7, 2))
-        ttk.Button(skills, text="APPLY SOLDIER CHANGES", style="PW.TButton", command=self.apply_fields).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        # Keep custom quote editing visually separate from the skill controls.
+        tk.Frame(right, bg=RED, height=3).pack(fill="x", pady=(10, 0))
+        custom_quotes = tk.Frame(right, bg=PANEL, padx=10, pady=10)
+        custom_quotes.pack(fill="x")
+        tk.Label(
+            custom_quotes,
+            text="CUSTOM DETAILS QUOTE (OPTIONAL)",
+            bg=PANEL,
+            fg=CREAM,
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+        self.custom_description_text = tk.Text(
+            custom_quotes,
+            height=5,
+            wrap="word",
+            undo=True,
+            font=("Segoe UI", 11),
+            bg="#f4f3ee",
+            fg="#11120f",
+            insertbackground="#11120f",
+            relief="sunken",
+            borderwidth=1,
+            padx=8,
+            pady=6,
+        )
+        self.custom_description_text.pack(fill="x")
+        tk.Label(
+            custom_quotes,
+            text="Stored beside the save and loaded automatically by the optional Custom Quote plugin.",
+            bg=PANEL,
+            fg=CREAM,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+        ttk.Button(custom_quotes, text="APPLY SOLDIER CHANGES", style="PW.TButton", command=self.apply_fields).pack(anchor="w", pady=(8, 0))
 
         # Kept as an internal buffer for record loading; the PTB interface does
         # not expose raw save bytes.
@@ -555,6 +664,12 @@ class SoldierEditor(tk.Tk):
         bottom.pack(fill="x", pady=(10, 0))
         ttk.Button(bottom, text="OPEN SAVE", style="PW.TButton", command=self.open_save).pack(side="left")
         ttk.Button(bottom, text="SAVE AS", style="PW.TButton", command=self.save_as).pack(side="left", padx=8)
+        ttk.Button(
+            bottom,
+            text="INSTALL CUSTOM QUOTE SUPPORT",
+            style="PW.TButton",
+            command=self.install_custom_quote_support,
+        ).pack(side="left", padx=8)
 
     @staticmethod
     def _row(parent, row: int, label: str, widget) -> None:
@@ -565,6 +680,13 @@ class SoldierEditor(tk.Tk):
     def _cap_vital_stat(variable: tk.StringVar) -> None:
         value = variable.get()
         capped = capped_vital_text(value)
+        if capped != value:
+            variable.set(capped)
+
+    @staticmethod
+    def _cap_relation_stat(variable: tk.StringVar) -> None:
+        value = variable.get()
+        capped = capped_relation_text(value)
         if capped != value:
             variable.set(capped)
 
@@ -580,6 +702,31 @@ class SoldierEditor(tk.Tk):
         name = KNOWN_SKILLS.get(value, "Unknown skill")
         description = SKILL_DESCRIPTIONS.get(value, "No verified description is available for this skill.")
         self.skill_description_var.set(f"{name}: {description}")
+
+    def play_voice_preview(self) -> None:
+        """Play the bundled sample corresponding to the selected voice profile."""
+        try:
+            voice = enum_value(self.voice_var.get(), "Voice profile")
+        except ValueError as exc:
+            messagebox.showerror("Voice preview", str(exc))
+            return
+        preview = self.resource_root / "voice_previews" / f"voice_{voice:02d}.wav"
+        if not preview.is_file():
+            messagebox.showinfo(
+                "Voice preview unavailable",
+                f"The authentic preview sample for Voice {voice} has not been captured yet.",
+            )
+            return
+        if winsound is None:
+            messagebox.showerror("Voice preview", "Voice previews require Windows audio support.")
+            return
+        try:
+            winsound.PlaySound(
+                str(preview),
+                winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+            )
+        except RuntimeError as exc:
+            messagebox.showerror("Voice preview", f"The preview could not be played.\n\n{exc}")
 
     def _grade_box(self, parent, column: int, label: str, variable: tk.StringVar, callback=None) -> None:
         panel = tk.Frame(parent, bg=RED, padx=5, pady=4)
@@ -734,6 +881,7 @@ class SoldierEditor(tk.Tk):
         self.header_index = index
         self.selected_slot = None
         self.dirty = False
+        self._load_custom_quotes(path)
         self._refresh_metadata_choices()
         self.refresh_list()
         self.status_var.set(f"Opened {path.name} — header index {index}")
@@ -974,12 +1122,27 @@ class SoldierEditor(tk.Tk):
         self.soldier_type_var.set(enum_label(record[SOLDIER_TYPE_OFFSET], SOLDIER_TYPES))
         self.service_type_var.set(enum_label(record[SERVICE_TYPE_OFFSET], SERVICE_TYPES))
         self.sex_var.set(enum_label(record[SEX_OFFSET], SEXES))
+        self.unit_title_var.set(enum_label(record[UNIT_TITLE_OFFSET], UNIT_TITLES))
+        self.voice_var.set(enum_label(record[VOICE_OFFSET], VOICES))
+        self.acquisition_method_var.set(
+            enum_label(record[ACQUISITION_METHOD_OFFSET], ACQUISITION_METHODS)
+        )
+        condition_flags = record[CONDITION_FLAGS_OFFSET]
+        self.condition_var.set(
+            "Condition: Normal (read-only)"
+            if condition_flags == 0
+            else "Condition: Sick/wounded state detected (read-only)"
+        )
         own_description = f"{slot + 1:03d} — {self.soldier_name(slot)}"
         self.description_var.set(own_description)
+        self.custom_description_text.delete("1.0", "end")
+        self.custom_description_text.insert("1.0", self.custom_quotes.get(slot, ""))
         self.update_portrait_preview()
         self.life_var.set(str(int.from_bytes(record[LIFE_MAX_OFFSET:LIFE_MAX_OFFSET + 2], "little")))
         self.psyche_var.set(str(int.from_bytes(record[PSYCHE_MAX_OFFSET:PSYCHE_MAX_OFFSET + 2], "little")))
         self.gmp_var.set(str(int.from_bytes(record[GMP_OFFSET:GMP_OFFSET + 2], "little")))
+        self.hostility_var.set(str(int.from_bytes(record[HOSTILITY_OFFSET:HOSTILITY_OFFSET + 2], "little")))
+        self.morale_var.set(str(int.from_bytes(record[MORALE_OFFSET:MORALE_OFFSET + 2], "little")))
         self.loaded_team_scores = {}
         for name, variable in self.team_score_vars.items():
             offset = TEAM_GRADE_OFFSETS[name]
@@ -1024,10 +1187,24 @@ class SoldierEditor(tk.Tk):
             soldier_type = enum_value(self.soldier_type_var.get(), "Soldier class")
             service_type = enum_value(self.service_type_var.get(), "Recruitment category")
             sex = enum_value(self.sex_var.get(), "Sex")
+            unit_title = enum_value(self.unit_title_var.get(), "Unit title")
+            voice = enum_value(self.voice_var.get(), "Voice profile")
+            acquisition_method = enum_value(self.acquisition_method_var.get(), "Acquisition method")
             description_slot = self.description_slots[self.description_var.get()]
+            custom_description = self.custom_description_text.get("1.0", "end-1c").strip()
+            try:
+                custom_description_bytes = custom_description.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("Custom Details Quote must be valid UTF-8 text") from exc
+            if len(custom_description_bytes) > CUSTOM_QUOTE_MAX_BYTES:
+                raise ValueError(
+                    f"Custom Details Quote must be no more than {CUSTOM_QUOTE_MAX_BYTES} UTF-8 bytes"
+                )
             life = parse_stat(self.life_var.get(), "Life")
             psyche = parse_stat(self.psyche_var.get(), "Psyche")
             gmp = parse_stat(self.gmp_var.get(), "Base GMP+", 0xFFFF)
+            hostility = parse_stat(self.hostility_var.get(), "Hostility", RELATION_STAT_MAX)
+            morale = parse_stat(self.morale_var.get(), "Morale", RELATION_STAT_MAX)
             team_scores = {
                 name: parse_battle_score(variable.get(), name)
                 for name, variable in self.team_score_vars.items()
@@ -1053,6 +1230,9 @@ class SoldierEditor(tk.Tk):
         self.data[start + SOLDIER_TYPE_OFFSET] = soldier_type
         self.data[start + SERVICE_TYPE_OFFSET] = service_type
         self.data[start + SEX_OFFSET] = sex
+        self.data[start + UNIT_TITLE_OFFSET] = unit_title
+        self.data[start + VOICE_OFFSET] = voice
+        self.data[start + ACQUISITION_METHOD_OFFSET] = acquisition_method
         life_bytes = life.to_bytes(2, "little")
         psyche_bytes = psyche.to_bytes(2, "little")
         self.data[start + LIFE_CURRENT_OFFSET : start + LIFE_CURRENT_OFFSET + 2] = life_bytes
@@ -1060,6 +1240,8 @@ class SoldierEditor(tk.Tk):
         self.data[start + PSYCHE_CURRENT_OFFSET : start + PSYCHE_CURRENT_OFFSET + 2] = psyche_bytes
         self.data[start + PSYCHE_MAX_OFFSET : start + PSYCHE_MAX_OFFSET + 2] = psyche_bytes
         self.data[start + GMP_OFFSET : start + GMP_OFFSET + 2] = gmp.to_bytes(2, "little")
+        self.data[start + HOSTILITY_OFFSET : start + HOSTILITY_OFFSET + 2] = hostility.to_bytes(2, "little")
+        self.data[start + MORALE_OFFSET : start + MORALE_OFFSET + 2] = morale.to_bytes(2, "little")
         for name, score in team_scores.items():
             offset = start + TEAM_GRADE_OFFSETS[name]
             self.data[offset:offset + 2] = score.to_bytes(2, "little")
@@ -1070,6 +1252,10 @@ class SoldierEditor(tk.Tk):
         self.data[start + DESCRIPTION_KEY_OFFSET : start + DESCRIPTION_KEY_OFFSET + DESCRIPTION_KEY_SIZE] = self.data[
             donor : donor + DESCRIPTION_KEY_SIZE
         ]
+        if custom_description:
+            self.custom_quotes[self.selected_slot] = custom_description
+        else:
+            self.custom_quotes.pop(self.selected_slot, None)
         self.data[start + SKILLS_OFFSET : start + SKILLS_OFFSET + VISIBLE_SKILLS] = skills
         if encoded_name:
             self.ensure_roster_includes(self.selected_slot)
@@ -1078,6 +1264,111 @@ class SoldierEditor(tk.Tk):
         self.refresh_list()
         self._select_slot(slot)
         self.status_var.set(f"Applied changes to slot {slot + 1}; use Save As to write a new save.")
+
+    def _custom_quote_sidecar(self, save_path: Path) -> Path:
+        return save_path.with_name(save_path.name + CUSTOM_QUOTE_SIDECAR_SUFFIX)
+
+    def _load_custom_quotes(self, save_path: Path) -> None:
+        self.custom_quotes = {}
+        sidecar = self._custom_quote_sidecar(save_path)
+        if not sidecar.is_file():
+            return
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            records = payload.get("soldiers", {})
+            for slot_text, item in records.items():
+                slot = int(slot_text) - 1
+                text = str(item.get("text", "")).strip()
+                if 0 <= slot < RECORD_COUNT and text:
+                    self.custom_quotes[slot] = text
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            messagebox.showwarning(
+                "Custom quote file",
+                f"Could not read {sidecar.name}. The save itself can still be edited.",
+            )
+
+    def _runtime_quote_entries(self) -> dict[int, dict[str, object]]:
+        if self.data is None:
+            return {}
+        entries: dict[int, dict[str, object]] = {}
+        for slot, text in sorted(self.custom_quotes.items()):
+            start = self.record_start(slot)
+            selector = bytes(self.data[start + DESCRIPTION_KEY_OFFSET : start + DESCRIPTION_KEY_OFFSET + 4])
+            # The current PC build resolves a Details Quote by adding six to
+            # the first selector byte before calling the localized text resolver.
+            runtime_index = selector[0] + 6
+            existing = entries.get(runtime_index)
+            if existing is not None and existing["text"] != text:
+                raise ValueError(
+                    f"Slots {existing['slot']} and {slot + 1} use the same Details Quote donor. "
+                    "Choose a different donor for one of them."
+                )
+            entries[runtime_index] = {
+                "slot": slot + 1,
+                "name": self.soldier_name(slot),
+                "selector": selector.hex(),
+                "text": text,
+            }
+        return entries
+
+    def _write_custom_quote_sidecar(self, save_path: Path) -> Path | None:
+        entries = self._runtime_quote_entries()
+        sidecar = self._custom_quote_sidecar(save_path)
+        if not entries:
+            if sidecar.exists():
+                sidecar.unlink()
+            return None
+        soldiers = {
+            str(item["slot"]): {
+                "name": item["name"],
+                "selector": item["selector"],
+                "runtime_index": runtime_index,
+                "text": item["text"],
+            }
+            for runtime_index, item in entries.items()
+        }
+        sidecar.write_text(
+            json.dumps({"version": 1, "save": save_path.name, "soldiers": soldiers}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return sidecar
+
+    def install_custom_quote_support(self) -> None:
+        plugin = self.resource_root / "quote_plugin" / "PeaceWalkerCustomQuotes.asi"
+        if not plugin.is_file():
+            messagebox.showerror(
+                "Custom Quote Support",
+                "PeaceWalkerCustomQuotes.asi is missing from this editor build.",
+            )
+            return
+        game_text = filedialog.askopenfilename(
+            title="Select METAL GEAR SOLID PEACE WALKER.exe",
+            filetypes=(("Peace Walker", "METAL GEAR SOLID PEACE WALKER.exe"), ("Applications", "*.exe")),
+        )
+        if not game_text:
+            return
+        game = Path(game_text)
+        if game.name.lower() != "metal gear solid peace walker.exe":
+            messagebox.showerror("Custom Quote Support", "Select the real Peace Walker game executable.")
+            return
+        if not (game.parent / "winmm.dll").is_file():
+            messagebox.showerror(
+                "Custom Quote Support",
+                "No compatible ASI loader was found beside the game. Install MGSPatriotFix first.",
+            )
+            return
+        destination = game.parent / "scripts" / plugin.name
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(plugin, destination)
+        except OSError as exc:
+            messagebox.showerror("Custom Quote Support", f"Could not install the plugin.\n\n{exc}")
+            return
+        messagebox.showinfo(
+            "Custom Quote Support Installed",
+            "Peace Walker will now load matching .pwquotes.json files automatically.\n\n"
+            "Restart the game if it is currently running.",
+        )
 
     def apply_raw(self) -> None:
         if self.data is None or self.selected_slot is None:
@@ -1152,10 +1443,20 @@ class SoldierEditor(tk.Tk):
             backup = self.source_path.with_name(self.source_path.name + ".backup")
             shutil.copy2(self.source_path, backup)
         output.write_bytes(candidate)
+        try:
+            sidecar = self._write_custom_quote_sidecar(output)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Custom Details Quotes",
+                f"The save was written, but its custom quote file could not be written.\n\n{exc}",
+            )
+            return
         self.dirty = False
         messagebox.showinfo(
             "Save written",
-            f"Saved {output.name}\n\nRequired checksum filename: {suggested}\n"
+            f"Saved {output.name}"
+            + (f"\nCustom quotes: {sidecar.name}" if sidecar is not None else "")
+            + f"\n\nRequired checksum filename: {suggested}\n"
             "If you chose another name, rename the file before loading it in game.",
         )
         self.status_var.set(f"Saved {output}")

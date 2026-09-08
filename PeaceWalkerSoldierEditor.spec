@@ -5,6 +5,14 @@ from pathlib import Path
 project_dir = Path(SPECPATH)
 datas = [(str(project_dir / "portrait_assets"), "portrait_assets")]
 
+voice_previews = project_dir / "voice_previews"
+if voice_previews.exists():
+    datas.append((str(voice_previews), "voice_previews"))
+
+quote_plugin = project_dir / "quote_plugin" / "dist" / "PeaceWalkerCustomQuotes.asi"
+if quote_plugin.exists():
+    datas.append((str(quote_plugin), "quote_plugin"))
+
 icon_path = project_dir / "app_icon.ico"
 if icon_path.exists():
     datas.append((str(icon_path), "."))
