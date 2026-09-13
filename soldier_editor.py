@@ -4,10 +4,11 @@ import json
 import shutil
 import sys
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 try:
     import winsound
@@ -19,6 +20,7 @@ from save_cipher import derive_state, filename_checksum, transform
 
 
 SAVE_SIZE = 0x4F950
+TRANSFARRING_SUFFIX_SIZE = 0x10
 ROSTER_BASE = 0x1FA80
 ROSTER_COUNT_OFFSET = ROSTER_BASE - 0x10
 RECORD_SIZE = 0xA0
@@ -26,6 +28,10 @@ RECORD_COUNT = 350
 SOLDIER_EXPORT_MAGIC = b"PWSOLDIER\x01"
 DESCRIPTION_KEY_OFFSET = 0x14
 DESCRIPTION_KEY_SIZE = 4
+QUOTE_KEY_OFFSET = 0x10
+QUOTE_KEY_SIZE = 4
+REGULAR_QUOTE_ID_MIN = 68
+REGULAR_QUOTE_ID_MAX = 329
 NAME_OFFSET = 0x20
 NAME_SIZE = 16
 ASSIGNMENT_OFFSET = 0x30
@@ -34,12 +40,9 @@ PORTRAIT_SET_OFFSET = 0x3E
 SOLDIER_TYPE_OFFSET = 0x31
 SERVICE_TYPE_OFFSET = 0x18
 SEX_OFFSET = 0x34
-UNIT_TITLE_OFFSET = 0x32
-VOICE_OFFSET = 0x33
 CONDITION_FLAGS_OFFSET = 0x36
 HOSTILITY_OFFSET = 0x7E
 MORALE_OFFSET = 0x82
-ACQUISITION_METHOD_OFFSET = 0x8C
 SKILLS_OFFSET = 0x98
 SKILLS_SIZE = 8
 VISIBLE_SKILLS = 4
@@ -77,6 +80,46 @@ VITAL_STAT_MAX = 9999
 RELATION_STAT_MAX = 999
 CUSTOM_QUOTE_SIDECAR_SUFFIX = ".pwquotes.json"
 CUSTOM_QUOTE_MAX_BYTES = 511
+# Story-character portrait pairs as stored in the staff record.
+SPECIAL_CHARACTER_PORTRAITS = {
+    "SNAKE": (0x45, 0x92),
+    "AMANDA": (0x46, 0x92),
+    "CHICO": (0x47, 0x92),
+    "HUEY": (0x48, 0x92),
+    "PAZ": (0x49, 0x92),
+    "ZADORNOV": (0x4A, 0x92),
+    "STRANGELOVE": (0x4C, 0x92),
+    "MILLER": (0x4B, 0x92),
+    "CÉCILE": (0x4D, 0x92),
+}
+SPECIAL_PORTRAIT_NAMES = {
+    pair: name.title() for name, pair in SPECIAL_CHARACTER_PORTRAITS.items()
+}
+SPECIAL_CHARACTER_NAMES = (
+    "SNAKE",
+    "MILLER",
+    "AMANDA",
+    "CHICO",
+    "HUEY",
+    "CÉCILE",
+    "STRANGELOVE",
+    "PAZ",
+)
+FIXED_CLASS_QUOTE_IDS = {
+    0x15: 340,  # Paz
+    0x16: 331,  # Miller
+    0x18: 1,    # Strangelove
+    0x19: 336,  # Chico
+    0x1A: 342,  # Amanda
+    0x1B: 341,  # Huey
+    0x1C: 333,  # Cecile
+    0x24: 337,  # Zadornov
+    0x57: 335,  # Hideo Kojima
+}
+# Extraction entries 301-648 are interface fragments, masks, bars, and other
+# non-portrait textures from the same TXP archive. Keep the files available as
+# research assets, but never offer them in the portrait selector.
+NON_PORTRAIT_ASSET_INDICES = range(301, 649)
 
 KNOWN_SKILLS = {
     0x00: "None",
@@ -171,6 +214,10 @@ PANEL = "#292b27"
 RED = "#ef3029"
 ORANGE = "#ff6519"
 CREAM = "#f2f0da"
+DARK_BG = "#171914"
+DARK_INK = "#f2f0da"
+DARK_FIELD = "#242620"
+DARK_BORDER = "#62645b"
 
 
 def skill_label(value: int) -> str:
@@ -203,20 +250,28 @@ SOLDIER_TYPES = {
     0x11: "Food Technician",
     0x12: "Nutritionist",
     0x13: "Medical Researcher",
+    0x15: "High School Student",
+    0x16: "MSF Subcommander",
+    0x18: "AI Researcher",
+    0x19: "Child Soldier",
+    0x1A: "FSLN Commander",
+    0x1B: "Bipedal Weapons Developer",
+    0x1C: "Ornithologist",
     0x24: "Commander",
     0x31: "Actress",
+    0x55: "Veteran Voice Actor",
     0x56: "New Voice Actor",
+    0x57: "Game Designer",
 }
 SERVICE_TYPES = {
-    0x04: "None / Special Character",
-    0x06: "Former Prisoner",
-    0x07: "Volunteer Soldier",
-    0x08: "Military Soldier",
+    0x02: "COL — Password recruit",
+    0x03: "TRD — Traded staff",
+    0x04: "UNQ — Unique character",
+    0x06: "POW — Rescued prisoner",
+    0x07: "VOL — Volunteer",
+    0x08: "NML — Fulton-recovered soldier",
 }
 SEXES = {0x10: "Female", 0x11: "Male"}
-UNIT_TITLES = {value: f"Title {value}" for value in range(1, 7)}
-VOICES = {value: f"Voice {value}" for value in range(1, 10)}
-ACQUISITION_METHODS = {value: f"Method {value}" for value in range(10)}
 ASSIGNMENTS = {
     0x00: "Unassigned",
     0x01: "Waiting Room",
@@ -235,8 +290,12 @@ def enum_label(value: int, names: dict[int, str]) -> str:
     return names.get(value, f"Unknown value ({value:02X})")
 
 
+def service_type_label(value: int) -> str:
+    return SERVICE_TYPES.get(value, f"??? — Unknown Value ({value:02X})")
+
+
 def enum_value(label: str, field: str) -> int:
-    for names in (ASSIGNMENTS, SOLDIER_TYPES, SERVICE_TYPES, SEXES, UNIT_TITLES, VOICES, ACQUISITION_METHODS):
+    for names in (ASSIGNMENTS, SOLDIER_TYPES, SERVICE_TYPES, SEXES):
         for value, name in names.items():
             if label == name:
                 return value
@@ -333,25 +392,67 @@ def parse_hex_byte(value: str, label: str) -> int:
     return number
 
 
+def decode_regular_quote_id(key: bytes) -> int:
+    """Decode the verified four-byte regular-staff quote key at record offset 0x10."""
+    if len(key) != QUOTE_KEY_SIZE:
+        raise ValueError("A Details Quote key must contain four bytes")
+    first, second, third, fourth = key
+    quote_id = (first - 6 * second + 36 * third + 46 * fourth + 71) % 262
+    return quote_id + 262 if quote_id < REGULAR_QUOTE_ID_MIN else quote_id
+
+
+def encode_regular_quote_id(quote_id: int, current_key: bytes) -> bytes:
+    """Encode a regular quote while preserving as much of the soldier key as possible."""
+    if not REGULAR_QUOTE_ID_MIN <= quote_id <= REGULAR_QUOTE_ID_MAX:
+        raise ValueError("Regular Details Quote ID must be between 68 and 329")
+    if len(current_key) != QUOTE_KEY_SIZE:
+        raise ValueError("A Details Quote key must contain four bytes")
+    old_first, old_second, third, fourth = current_key
+    residue = quote_id % 262
+    candidates = []
+    for second in range(256):
+        first = (residue + 6 * second - 36 * third - 46 * fourth - 71) % 262
+        if first <= 0xFF:
+            candidates.append((abs(second - old_second), abs(first - old_first), first, second))
+    if not candidates:
+        raise ValueError("Could not encode the selected Details Quote")
+    _, _, first, second = min(candidates)
+    return bytes((first, second, third, fourth))
+
+
 class SoldierEditor(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Peace Walker Soldier Editor")
         self.geometry("1280x860")
         self.minsize(1080, 720)
+        self.settings_path = Path.home() / "AppData" / "Roaming" / "PeaceWalkerSoldierEditor" / "settings.json"
+        self.dark_mode_var = tk.BooleanVar(value=self._load_dark_mode_setting())
         self.configure(bg=BG)
         self.data: bytearray | None = None
         self.source_path: Path | None = None
         self.header_index: int | None = None
         self.selected_slot: int | None = None
-        self.description_slots: dict[str, int] = {}
+        self.quote_choices: dict[str, int] = {}
+        self.quote_label_by_id: dict[int, str] = {}
+        self.quote_text_by_id: dict[int, str] = {}
+        self.custom_quote_templates: dict[str, str] = {}
+        self.loaded_quote_key = b""
         self.custom_quotes: dict[int, str] = {}
+        self.custom_quote_selections: dict[int, str] = {}
+        self.custom_quote_drafts: dict[int, dict[str, str]] = {}
+        self.loading_custom_quote = False
         self.portrait_files: dict[int, Path] = {}
         self.portrait_files_by_code: dict[tuple[int, int], list[tuple[int, Path]]] = {}
         self.portrait_photo = None
+        self.staff_tag_photo = None
         self.dirty = False
+        self.modified_slots: set[int] = set()
+        self.soldier_drafts: dict[int, dict[str, object]] = {}
+        self.loading_soldier = False
 
         self.resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        self._load_quote_library()
         app_icon = self.resource_root / "app_icon.ico"
         if app_icon.is_file():
             try:
@@ -366,6 +467,9 @@ class SoldierEditor(tk.Tk):
             if portrait_root.is_dir():
                 for path in portrait_root.glob("*.png"):
                     try:
+                        extraction_index = int(path.stem.split("_")[1])
+                        if extraction_index in NON_PORTRAIT_ASSET_INDICES:
+                            continue
                         resource_hash = int(path.stem.rsplit("_", 1)[1], 16)
                         self.portrait_files[resource_hash] = path
                         portrait_set = (resource_hash >> 16) & 0xFF
@@ -380,9 +484,10 @@ class SoldierEditor(tk.Tk):
                     break
 
         portrait_pairs = sorted(self.portrait_files_by_code)
-        self.portrait_choices = {
-            f"Portrait {index + 1}": pair for index, pair in enumerate(portrait_pairs)
-        }
+        self.portrait_choices = {}
+        for index, pair in enumerate(portrait_pairs):
+            label = SPECIAL_PORTRAIT_NAMES.get(pair, f"Portrait {index + 1}")
+            self.portrait_choices[label] = pair
         self.portrait_choice_by_code = {
             pair: label for label, pair in self.portrait_choices.items()
         }
@@ -390,6 +495,117 @@ class SoldierEditor(tk.Tk):
         self._build_menu()
         self._build_style()
         self._build_ui()
+        self._bind_soldier_change_tracking()
+        self._apply_appearance()
+
+    def _editable_soldier_variables(self) -> list[tk.StringVar]:
+        return [
+            self.name_var, self.assignment_var, self.portrait_choice_var,
+            self.soldier_type_var, self.service_type_var, self.sex_var,
+            self.description_var, self.life_var, self.psyche_var, self.gmp_var,
+            self.hostility_var, self.morale_var, self.combat_score_var,
+            *self.team_score_vars.values(), *self.battle_score_vars.values(),
+            *self.skill_vars,
+        ]
+
+    def _bind_soldier_change_tracking(self) -> None:
+        for variable in self._editable_soldier_variables():
+            variable.trace_add("write", self._soldier_field_changed)
+
+    def _soldier_field_changed(self, *_args) -> None:
+        if self.loading_soldier or self.selected_slot is None or self.selected_slot < 0:
+            return
+        self.soldier_drafts[self.selected_slot] = self._current_soldier_form()
+        self.modified_slots.add(self.selected_slot)
+        self.dirty = True
+        self._style_modified_roster_items()
+
+    def _current_soldier_form(self) -> dict[str, object]:
+        return {
+            "name": self.name_var.get(),
+            "assignment": self.assignment_var.get(),
+            "portrait": self.portrait_choice_var.get(),
+            "soldier_type": self.soldier_type_var.get(),
+            "service_type": self.service_type_var.get(),
+            "sex": self.sex_var.get(),
+            "description": self.description_var.get(),
+            "life": self.life_var.get(),
+            "psyche": self.psyche_var.get(),
+            "gmp": self.gmp_var.get(),
+            "hostility": self.hostility_var.get(),
+            "morale": self.morale_var.get(),
+            "combat_score": self.combat_score_var.get(),
+            "team_scores": {name: variable.get() for name, variable in self.team_score_vars.items()},
+            "battle_scores": {name: variable.get() for name, variable in self.battle_score_vars.items()},
+            "skills": [variable.get() for variable in self.skill_vars],
+        }
+
+    def _restore_soldier_form(self, draft: dict[str, object]) -> None:
+        scalar_fields = (
+            (self.name_var, "name"), (self.assignment_var, "assignment"),
+            (self.portrait_choice_var, "portrait"), (self.soldier_type_var, "soldier_type"),
+            (self.service_type_var, "service_type"), (self.sex_var, "sex"),
+            (self.description_var, "description"), (self.life_var, "life"),
+            (self.psyche_var, "psyche"), (self.gmp_var, "gmp"),
+            (self.hostility_var, "hostility"), (self.morale_var, "morale"),
+            (self.combat_score_var, "combat_score"),
+        )
+        for variable, key in scalar_fields:
+            if key in draft:
+                variable.set(str(draft[key]))
+        for name, value in dict(draft.get("team_scores", {})).items():
+            if name in self.team_score_vars:
+                self.team_score_vars[name].set(str(value))
+        for name, value in dict(draft.get("battle_scores", {})).items():
+            if name in self.battle_score_vars:
+                self.battle_score_vars[name].set(str(value))
+        for variable, value in zip(self.skill_vars, list(draft.get("skills", []))):
+            variable.set(str(value))
+
+    def _load_dark_mode_setting(self) -> bool:
+        try:
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            return bool(settings.get("dark_mode", False))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+
+    def _save_dark_mode_setting(self) -> None:
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path.write_text(
+                json.dumps({"dark_mode": self.dark_mode_var.get()}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _load_quote_library(self) -> None:
+        quote_path = self.resource_root / "quote_assets" / "quote_ids_en.json"
+        try:
+            records = json.loads(quote_path.read_text(encoding="utf-8"))
+            for record in records:
+                quote_id = int(record["quote_id"])
+                text = str(record["text"]).strip()
+                summary = " ".join(text.split())
+                if len(summary) > 88:
+                    summary = summary[:85].rstrip() + "…"
+                label = f"{quote_id:03d} — {summary}"
+                self.quote_label_by_id[quote_id] = label
+                self.quote_text_by_id[quote_id] = text
+                if REGULAR_QUOTE_ID_MIN <= quote_id <= REGULAR_QUOTE_ID_MAX:
+                    self.quote_choices[label] = quote_id
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            self.quote_choices = {}
+            self.quote_label_by_id = {}
+            self.quote_text_by_id = {}
+        japanese_path = self.resource_root / "quote_assets" / "quote_ids_ja.json"
+        try:
+            records = json.loads(japanese_path.read_text(encoding="utf-8"))
+            for template_number, record in enumerate(records, start=1):
+                text = str(record["text"]).strip()
+                self.custom_quote_templates[f"Custom {template_number:03d}"] = text
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            self.custom_quote_templates = {}
 
     def _build_style(self) -> None:
         style = ttk.Style(self)
@@ -410,14 +626,114 @@ class SoldierEditor(tk.Tk):
         style.configure("Orange.TLabel", background=ORANGE, foreground="white", font=("Segoe UI", 12, "bold"))
         style.configure("PW.TButton", font=("Segoe UI", 10, "bold"), padding=7)
 
+    def _apply_appearance(self) -> None:
+        dark = self.dark_mode_var.get()
+        page = DARK_BG if dark else BG
+        ink = DARK_INK if dark else INK
+        field = DARK_FIELD if dark else "white"
+        border = DARK_BORDER if dark else "#9b9b91"
+        self.configure(bg=page)
+
+        style = ttk.Style(self)
+        style.configure("PW.TFrame", background=page)
+        style.configure("PW.TLabel", background=page, foreground=ink)
+        style.configure("Title.TLabel", background=page, foreground=ink)
+        style.configure("Sub.TLabel", background=page, foreground=ink)
+        style.configure("TFrame", background=page)
+        style.configure("TLabel", background=page, foreground=ink)
+        style.configure("TButton", background=field, foreground=ink, bordercolor=border)
+        style.configure("PW.TButton", background=field, foreground=ink, bordercolor=border)
+        style.map("TButton", background=[("active", RED if dark else "#e7e5d5")])
+        style.map("PW.TButton", background=[("active", RED if dark else "#e7e5d5")])
+        for widget_style in ("TEntry", "TCombobox"):
+            style.configure(
+                widget_style,
+                fieldbackground=field,
+                background=field,
+                foreground=ink,
+                arrowcolor=ink,
+                bordercolor=border,
+                lightcolor=border,
+                darkcolor=border,
+            )
+            style.map(
+                widget_style,
+                fieldbackground=[("readonly", field), ("disabled", field)],
+                foreground=[("readonly", ink), ("disabled", "#85877f")],
+                selectbackground=[("readonly", RED)],
+                selectforeground=[("readonly", "white")],
+            )
+
+        def recolor(widget: tk.Misc) -> None:
+            try:
+                background = str(widget.cget("background")).lower()
+                if background in (BG.lower(), DARK_BG.lower()):
+                    widget.configure(background=page)
+                elif isinstance(widget, (tk.Listbox, tk.Text)) and background in (
+                    "white", "systemwindow", "#f4f3ee", DARK_FIELD.lower()
+                ):
+                    widget.configure(background=field)
+            except tk.TclError:
+                pass
+            try:
+                foreground = str(widget.cget("foreground")).lower()
+                if foreground in (
+                    INK.lower(), DARK_INK.lower(), "#11120f", "black",
+                    "systemwindowtext", "systembuttontext"
+                ):
+                    widget.configure(foreground=ink)
+            except tk.TclError:
+                pass
+            if isinstance(widget, (tk.Listbox, tk.Text)):
+                try:
+                    widget.configure(
+                        insertbackground=ink,
+                        selectbackground=RED,
+                        selectforeground="white",
+                        highlightbackground=border,
+                    )
+                except tk.TclError:
+                    pass
+            for child in widget.winfo_children():
+                recolor(child)
+
+        recolor(self)
+        for menu in (self.main_menu, self.file_menu, self.appearance_menu, self.roster_menu):
+            menu.configure(
+                bg=field,
+                fg=ink,
+                activebackground=RED,
+                activeforeground="white",
+                selectcolor=RED,
+            )
+        if hasattr(self, "staff_tag_panel"):
+            self.update_staff_tags()
+        if hasattr(self, "roster"):
+            self._style_modified_roster_items()
+
+    def _toggle_dark_mode(self) -> None:
+        self._apply_appearance()
+        self._save_dark_mode_setting()
+
     def _build_menu(self) -> None:
         menu = tk.Menu(self)
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Open PC Save…", command=self.open_save)
+        file_menu.add_command(label="Create Soldier…", command=self.open_soldier_creation_wizard)
         file_menu.add_command(label="Save As…", command=self.save_as)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy)
         menu.add_cascade(label="File", menu=file_menu)
+        appearance_menu = tk.Menu(menu, tearoff=False)
+        appearance_menu.add_checkbutton(
+            label="Dark Mode",
+            variable=self.dark_mode_var,
+            command=self._toggle_dark_mode,
+        )
+        menu.add_cascade(label="Appearance", menu=appearance_menu)
+        self.main_menu = menu
+        self.file_menu = file_menu
+        self.appearance_menu = appearance_menu
         self.config(menu=menu)
 
     def _build_ui(self) -> None:
@@ -466,13 +782,20 @@ class SoldierEditor(tk.Tk):
 
         card = ttk.Frame(right, style="PW.TFrame")
         card.pack(fill="x")
-        portrait = tk.Frame(card, bg="#11120f", width=230, height=230, highlightbackground="#77776b", highlightthickness=2)
-        portrait.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 16))
+        portrait_column = tk.Frame(card, bg=BG, width=230)
+        portrait_column.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 16))
+        portrait = tk.Frame(portrait_column, bg="#11120f", width=230, height=230, highlightbackground="#77776b", highlightthickness=2)
+        portrait.pack(anchor="nw")
         portrait.grid_propagate(False)
         self.portrait_text = tk.Label(portrait, text="PORTRAIT", bg="#11120f", fg="#dad8c3", font=("Segoe UI", 18), justify="center")
         self.portrait_text.place(x=0, y=0, relwidth=1, relheight=1)
         self.portrait_code = tk.Label(portrait, text="Portrait", bg="#11120f", fg="#dad8c3", font=("Segoe UI", 11), padx=8, pady=3)
         self.portrait_code.place(relx=.5, rely=1, anchor="s")
+
+        # Keep the tag in the portrait's own column. A shared card grid row is
+        # pushed downward by the regular-soldier metadata and stats controls.
+        self.staff_tag_panel = tk.Label(portrait_column, bg=BG, bd=0, highlightthickness=0)
+        self.staff_tag_panel.pack(anchor="nw", pady=(4, 0))
 
         identity = ttk.Frame(card, style="PW.TFrame")
         identity.grid(row=0, column=1, sticky="ew")
@@ -482,15 +805,13 @@ class SoldierEditor(tk.Tk):
         self.soldier_type_var = tk.StringVar()
         self.service_type_var = tk.StringVar()
         self.sex_var = tk.StringVar()
-        self.unit_title_var = tk.StringVar()
-        self.voice_var = tk.StringVar()
-        self.acquisition_method_var = tk.StringVar()
         self.condition_var = tk.StringVar(value="Normal")
         self.description_var = tk.StringVar()
         ttk.Entry(identity, textvariable=self.name_var, width=28, font=("Segoe UI", 18)).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(identity, text="Assignment", style="PW.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.assignment_box = ttk.Combobox(identity, textvariable=self.assignment_var, width=20, state="readonly")
         self.assignment_box.grid(row=2, column=0, sticky="w")
+        self.assignment_box.bind("<<ComboboxSelected>>", lambda _event: self.update_staff_tags())
         ttk.Label(identity, text="Portrait", style="PW.TLabel").grid(row=1, column=1, sticky="w", padx=(14, 0), pady=(8, 0))
         portrait_box = ttk.Combobox(
             identity,
@@ -505,48 +826,22 @@ class SoldierEditor(tk.Tk):
         metadata = ttk.Frame(card, style="PW.TFrame")
         metadata.grid(row=1, column=1, sticky="ew", pady=(14, 0))
         ttk.Label(metadata, text="Soldier class", style="PW.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(metadata, text="Recruitment category", style="PW.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(metadata, text="Acquisition method", style="PW.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
         ttk.Label(metadata, text="Sex", style="PW.TLabel").grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.soldier_type_box = ttk.Combobox(metadata, textvariable=self.soldier_type_var, width=23, state="readonly")
         self.soldier_type_box.grid(row=1, column=0, sticky="w")
+        self.soldier_type_box.bind("<<ComboboxSelected>>", self._update_quote_control)
         self.service_type_box = ttk.Combobox(metadata, textvariable=self.service_type_var, width=23, state="readonly")
         self.service_type_box.grid(row=1, column=1, sticky="w", padx=(10, 0))
+        self.service_type_box.bind("<<ComboboxSelected>>", lambda _event: self.update_staff_tags())
         self.sex_box = ttk.Combobox(metadata, textvariable=self.sex_var, width=15, state="readonly")
         self.sex_box.grid(row=1, column=2, sticky="w", padx=(10, 0))
 
-        ttk.Label(metadata, text="Details Quote donor", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(metadata, text="Details Quote", style="PW.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.description_box = ttk.Combobox(metadata, textvariable=self.description_var, width=58, state="readonly")
         self.description_box.grid(row=3, column=0, columnspan=3, sticky="ew")
-        ttk.Label(metadata, text="Unit title", style="PW.TLabel").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(metadata, text="Voice profile", style="PW.TLabel").grid(row=4, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
-        ttk.Label(metadata, text="Acquisition method", style="PW.TLabel").grid(row=4, column=2, sticky="w", padx=(10, 0), pady=(10, 0))
-        self.unit_title_box = ttk.Combobox(
-            metadata, textvariable=self.unit_title_var, values=list(UNIT_TITLES.values()), width=23, state="readonly"
-        )
-        self.unit_title_box.grid(row=5, column=0, sticky="w")
-        voice_controls = ttk.Frame(metadata, style="PW.TFrame")
-        voice_controls.grid(row=5, column=1, sticky="w", padx=(10, 0))
-        self.voice_box = ttk.Combobox(
-            voice_controls, textvariable=self.voice_var, values=list(VOICES.values()), width=15, state="readonly"
-        )
-        self.voice_box.pack(side="left")
-        ttk.Button(
-            voice_controls,
-            text="▶",
-            width=2,
-            style="PW.TButton",
-            command=self.play_voice_preview,
-        ).pack(side="left", padx=(5, 0))
-        self.acquisition_method_box = ttk.Combobox(
-            metadata,
-            textvariable=self.acquisition_method_var,
-            values=list(ACQUISITION_METHODS.values()),
-            width=15,
-            state="readonly",
-        )
-        self.acquisition_method_box.grid(row=5, column=2, sticky="w", padx=(10, 0))
         ttk.Label(metadata, textvariable=self.condition_var, style="PW.TLabel").grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(5, 0)
+            row=4, column=0, columnspan=3, sticky="w", pady=(5, 0)
         )
         stats = tk.Frame(card, bg=PANEL, padx=8, pady=8)
         stats.grid(row=2, column=1, sticky="ew", pady=(16, 0))
@@ -625,11 +920,23 @@ class SoldierEditor(tk.Tk):
         custom_quotes.pack(fill="x")
         tk.Label(
             custom_quotes,
-            text="CUSTOM DETAILS QUOTE (OPTIONAL)",
+            text="CUSTOM QUOTE (OPTIONAL)",
             bg=PANEL,
             fg=CREAM,
             font=("Segoe UI", 14, "bold"),
         ).pack(anchor="w", pady=(0, 6))
+        template_row = tk.Frame(custom_quotes, bg=PANEL)
+        template_row.pack(fill="x", pady=(0, 6))
+        self.custom_quote_template_var = tk.StringVar()
+        self.custom_quote_template_box = ttk.Combobox(
+            template_row,
+            textvariable=self.custom_quote_template_var,
+            values=list(self.custom_quote_templates),
+            state="readonly",
+            width=72,
+        )
+        self.custom_quote_template_box.pack(side="left", fill="x", expand=True)
+        self.custom_quote_template_box.bind("<<ComboboxSelected>>", self._use_custom_quote_template)
         self.custom_description_text = tk.Text(
             custom_quotes,
             height=5,
@@ -645,6 +952,8 @@ class SoldierEditor(tk.Tk):
             pady=6,
         )
         self.custom_description_text.pack(fill="x")
+        self.custom_description_text.edit_modified(False)
+        self.custom_description_text.bind("<<Modified>>", self._custom_quote_text_changed)
         tk.Label(
             custom_quotes,
             text="Stored beside the save and loaded automatically by the optional Custom Quote plugin.",
@@ -670,6 +979,116 @@ class SoldierEditor(tk.Tk):
             style="PW.TButton",
             command=self.install_custom_quote_support,
         ).pack(side="left", padx=8)
+
+    def _use_custom_quote_template(self, _event: object | None = None) -> None:
+        selection = self.custom_quote_template_var.get()
+        if " — Taken by " in selection:
+            previous = ""
+            if self.selected_slot is not None and self.selected_slot >= 0:
+                previous = self.custom_quote_selections.get(self.selected_slot, "")
+            self.custom_quote_template_var.set(previous)
+            self.status_var.set(f"{selection} is already assigned to another soldier.")
+            return
+        if selection not in self.custom_quote_templates:
+            return
+        if self.selected_slot is not None and self.selected_slot >= 0:
+            self.custom_quote_selections[self.selected_slot] = selection
+            text = self.custom_quote_drafts.get(self.selected_slot, {}).get(selection, "")
+            if text:
+                self.custom_quotes[self.selected_slot] = text
+            else:
+                self.custom_quotes.pop(self.selected_slot, None)
+            self._set_custom_quote_text(text)
+            self.dirty = True
+            self.modified_slots.add(self.selected_slot)
+            self._style_modified_roster_items()
+
+    def _custom_quote_owner(self, selection: str) -> int | None:
+        for slot, drafts in self.custom_quote_drafts.items():
+            if drafts.get(selection):
+                return slot
+        return None
+
+    def _refresh_custom_quote_choices(self, current_slot: int | None) -> None:
+        choices = []
+        for selection in self.custom_quote_templates:
+            owner = self._custom_quote_owner(selection)
+            if owner is not None and owner != current_slot:
+                choices.append(f"{selection} — Taken by {self.soldier_name(owner)}")
+            else:
+                choices.append(selection)
+        self.custom_quote_template_box.configure(values=choices)
+
+    def _set_custom_quote_text(self, text: str) -> None:
+        self.loading_custom_quote = True
+        try:
+            self.custom_description_text.delete("1.0", "end")
+            if text:
+                self.custom_description_text.insert("1.0", text)
+            self.custom_description_text.edit_modified(False)
+        finally:
+            self.loading_custom_quote = False
+
+    def _custom_quote_text_changed(self, _event: object | None = None) -> None:
+        if not self.custom_description_text.edit_modified():
+            return
+        self.custom_description_text.edit_modified(False)
+        if self.loading_custom_quote or self.selected_slot is None or self.selected_slot < 0:
+            return
+        text = self.custom_description_text.get("1.0", "end-1c")
+        if text:
+            if not self.custom_quote_template_var.get():
+                available = next(
+                    (
+                        selection for selection in self.custom_quote_templates
+                        if self._custom_quote_owner(selection) in (None, self.selected_slot)
+                    ),
+                    "",
+                )
+                if not available:
+                    self.status_var.set("All Custom Quote slots are already in use.")
+                    return
+                self.custom_quote_template_var.set(available)
+            selection = self.custom_quote_template_var.get()
+            self.custom_quote_selections[self.selected_slot] = selection
+            self.custom_quote_drafts.setdefault(self.selected_slot, {})[selection] = text
+            self.custom_quotes[self.selected_slot] = text
+        else:
+            selection = self.custom_quote_template_var.get()
+            if selection:
+                drafts = self.custom_quote_drafts.get(self.selected_slot)
+                if drafts is not None:
+                    drafts.pop(selection, None)
+                    if not drafts:
+                        self.custom_quote_drafts.pop(self.selected_slot, None)
+            self.custom_quotes.pop(self.selected_slot, None)
+        self._refresh_custom_quote_choices(self.selected_slot)
+        self.dirty = True
+        self.modified_slots.add(self.selected_slot)
+        self._style_modified_roster_items()
+
+    def _show_custom_quote(self, slot: int | None) -> None:
+        self.loading_custom_quote = True
+        try:
+            self.custom_description_text.delete("1.0", "end")
+            if slot is not None and slot >= 0:
+                selection = self.custom_quote_selections.get(slot, "")
+                owner = self._custom_quote_owner(selection) if selection else None
+                if owner is not None and owner != slot and not self.custom_quote_drafts.get(slot, {}).get(selection):
+                    selection = ""
+                    self.custom_quote_selections.pop(slot, None)
+                self._refresh_custom_quote_choices(slot)
+                self.custom_quote_template_var.set(selection)
+                text = self.custom_quote_drafts.get(slot, {}).get(
+                    selection, self.custom_quotes.get(slot, "")
+                )
+                self.custom_description_text.insert("1.0", text)
+            else:
+                self._refresh_custom_quote_choices(None)
+                self.custom_quote_template_var.set("")
+            self.custom_description_text.edit_modified(False)
+        finally:
+            self.loading_custom_quote = False
 
     @staticmethod
     def _row(parent, row: int, label: str, widget) -> None:
@@ -867,8 +1286,16 @@ class SoldierEditor(tk.Tk):
         path = Path(path_text)
         try:
             encrypted = bytearray(path.read_bytes())
-            if len(encrypted) != SAVE_SIZE:
-                raise ValueError(f"Expected {SAVE_SIZE} bytes; file contains {len(encrypted)}")
+            valid_size = len(encrypted) == SAVE_SIZE
+            transfarring_size = (
+                len(encrypted) == SAVE_SIZE + TRANSFARRING_SUFFIX_SIZE
+                and encrypted[SAVE_SIZE:] == b"\0" * TRANSFARRING_SUFFIX_SIZE
+            )
+            if not (valid_size or transfarring_size):
+                raise ValueError(
+                    f"Expected {SAVE_SIZE} bytes, or {SAVE_SIZE + TRANSFARRING_SUFFIX_SIZE} "
+                    f"bytes for a Transfarring-converted save; file contains {len(encrypted)}"
+                )
             index, *_ = derive_state(encrypted)
             transform(encrypted, index)
             if encrypted[0x40:0x44] != b"oEbN":
@@ -881,10 +1308,13 @@ class SoldierEditor(tk.Tk):
         self.header_index = index
         self.selected_slot = None
         self.dirty = False
+        self.modified_slots.clear()
+        self.soldier_drafts.clear()
         self._load_custom_quotes(path)
         self._refresh_metadata_choices()
         self.refresh_list()
-        self.status_var.set(f"Opened {path.name} — header index {index}")
+        format_note = " — Transfarring-converted format" if transfarring_size else ""
+        self.status_var.set(f"Opened {path.name} — header index {index}{format_note}")
 
     def record_start(self, slot: int) -> int:
         return ROSTER_BASE + slot * RECORD_SIZE
@@ -914,6 +1344,14 @@ class SoldierEditor(tk.Tk):
         self.roster.selection_set(index)
         self.roster.activate(index)
         self.select_soldier()
+        if self.selected_slot == -1:
+            self.roster_menu.entryconfigure("Export soldier...", state="disabled")
+            self.roster_menu.entryconfigure("Import soldier...", state="disabled")
+            try:
+                self.roster_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.roster_menu.grab_release()
+            return
         empty = self.selected_slot is not None and self.soldier_name(self.selected_slot) == "<empty>"
         self.roster_menu.entryconfigure("Export soldier...", state="disabled" if empty else "normal")
         self.roster_menu.entryconfigure("Import soldier...", state="normal" if empty else "disabled")
@@ -981,6 +1419,167 @@ class SoldierEditor(tk.Tk):
         self._select_slot(slot)
         self.status_var.set(f"Imported {imported_name} into slot {slot + 1}; use Save As to write it.")
 
+    def open_soldier_creation_wizard(self) -> None:
+        if self.data is None:
+            messagebox.showinfo("No save open", "Open a PC STW save before creating a soldier.")
+            return
+        vacant_slot = next(
+            (slot for slot in range(RECORD_COUNT) if self.soldier_name(slot) == "<empty>"),
+            None,
+        )
+        if vacant_slot is None:
+            messagebox.showinfo("Roster full", "There are no vacant soldier slots in this save.")
+            return
+
+        wizard = tk.Toplevel(self)
+        wizard.title("Soldier Creation Wizard")
+        wizard.transient(self)
+        wizard.resizable(False, False)
+        wizard.configure(bg=DARK_BG if self.dark_mode_var.get() else BG)
+        body = ttk.Frame(wizard, padding=16, style="PW.TFrame")
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="CREATE A SOLDIER", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(
+            body,
+            text=f"The new soldier will use vacant slot {vacant_slot + 1}.",
+            style="PW.TLabel",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 12))
+
+        fields: dict[str, tk.StringVar] = {
+            "name": tk.StringVar(),
+            "assignment": tk.StringVar(value="Unassigned"),
+            "portrait": tk.StringVar(value=next(iter(self.portrait_choices), "")),
+            "soldier_type": tk.StringVar(value="Infantry"),
+            "service_type": tk.StringVar(value="NML — Fulton-recovered soldier"),
+            "sex": tk.StringVar(value="Male"),
+            "life": tk.StringVar(value="1000"),
+            "psyche": tk.StringVar(value="1000"),
+            "combat": tk.StringVar(value="100"),
+            "R&D": tk.StringVar(value="100"),
+            "Mess Hall": tk.StringVar(value="100"),
+            "Medical": tk.StringVar(value="100"),
+            "Intel": tk.StringVar(value="100"),
+        }
+
+        choices = {
+            "assignment": list(ASSIGNMENTS.values()),
+            "portrait": list(self.portrait_choices),
+            "soldier_type": list(SOLDIER_TYPES.values()),
+            "service_type": list(SERVICE_TYPES.values()),
+            "sex": list(SEXES.values()),
+        }
+        specs = (
+            ("Codename", "name"), ("Assignment", "assignment"),
+            ("Portrait", "portrait"), ("Soldier class", "soldier_type"),
+            ("Acquisition method", "service_type"), ("Sex", "sex"),
+            ("Life", "life"), ("Psyche", "psyche"),
+            ("Combat", "combat"), ("R&D", "R&D"),
+            ("Mess Hall", "Mess Hall"), ("Medical", "Medical"),
+            ("Intel", "Intel"),
+        )
+        name_entry = None
+        for index, (label, key) in enumerate(specs):
+            pair = index % 2
+            row = 2 + index // 2
+            column = pair * 2
+            ttk.Label(body, text=label, style="PW.TLabel").grid(
+                row=row, column=column, sticky="w", padx=(0 if pair == 0 else 14, 6), pady=4
+            )
+            if key in choices:
+                control = ttk.Combobox(
+                    body, textvariable=fields[key], values=choices[key], state="readonly", width=29
+                )
+            else:
+                control = ttk.Entry(body, textvariable=fields[key], width=32)
+            control.grid(row=row, column=column + 1, sticky="ew", pady=4)
+            if key == "name":
+                name_entry = control
+
+        def create() -> None:
+            assert self.data is not None
+            try:
+                encoded_name = fields["name"].get().strip().encode("ascii")
+                if not encoded_name:
+                    raise ValueError("Enter a codename for the new soldier")
+                if len(encoded_name) > NAME_SIZE - 1:
+                    raise ValueError("Codename must be at most 15 ASCII characters")
+                for key in ("assignment", "soldier_type", "service_type", "sex"):
+                    enum_value(fields[key].get(), key.replace("_", " ").title())
+                if fields["portrait"].get() not in self.portrait_choices:
+                    raise ValueError("Choose an available portrait")
+                parse_stat(fields["life"].get(), "Life")
+                parse_stat(fields["psyche"].get(), "Psyche")
+                parse_battle_score(fields["combat"].get(), "Combat")
+                for key in ("R&D", "Mess Hall", "Medical", "Intel"):
+                    parse_battle_score(fields[key].get(), key)
+            except (UnicodeEncodeError, ValueError) as exc:
+                messagebox.showerror("Cannot create soldier", str(exc), parent=wizard)
+                return
+
+            template_slot = next(
+                (slot for slot in range(RECORD_COUNT) if self.soldier_name(slot) != "<empty>"),
+                None,
+            )
+            if template_slot is None:
+                messagebox.showerror(
+                    "Cannot create soldier",
+                    "This save has no populated soldier record to use as a safe internal template.",
+                    parent=wizard,
+                )
+                return
+            source = self.record_start(template_slot)
+            target = self.record_start(vacant_slot)
+            self.data[target : target + RECORD_SIZE] = self.data[source : source + RECORD_SIZE]
+            self.data[target + NAME_OFFSET : target + NAME_OFFSET + NAME_SIZE] = (
+                encoded_name + b"\0" * (NAME_SIZE - len(encoded_name))
+            )
+            self.ensure_roster_includes(vacant_slot)
+            self.assignment_filter_var.set("All assignments")
+            self.search_var.set("")
+            self.refresh_list()
+            self._select_slot(vacant_slot)
+
+            self.loading_soldier = True
+            try:
+                self.name_var.set(fields["name"].get().strip())
+                self.assignment_var.set(fields["assignment"].get())
+                self.portrait_choice_var.set(fields["portrait"].get())
+                self.soldier_type_var.set(fields["soldier_type"].get())
+                self.service_type_var.set(fields["service_type"].get())
+                self.sex_var.set(fields["sex"].get())
+                self.life_var.set(fields["life"].get())
+                self.psyche_var.set(fields["psyche"].get())
+                self.combat_score_var.set(fields["combat"].get())
+                for key, variable in self.team_score_vars.items():
+                    variable.set(fields[key].get())
+                for variable in self.battle_score_vars.values():
+                    variable.set(fields["combat"].get())
+                for variable in self.skill_vars:
+                    variable.set("None")
+            finally:
+                self.loading_soldier = False
+            self.apply_fields()
+            self.modified_slots.add(vacant_slot)
+            self._style_modified_roster_items()
+            wizard.destroy()
+            self.status_var.set(
+                f"Created {fields['name'].get().strip()} in vacant slot {vacant_slot + 1}; save to keep it."
+            )
+
+        actions = ttk.Frame(body, style="PW.TFrame")
+        actions.grid(row=10, column=0, columnspan=4, sticky="e", pady=(14, 0))
+        ttk.Button(actions, text="CANCEL", command=wizard.destroy).pack(side="right")
+        ttk.Button(actions, text="CREATE SOLDIER", style="PW.TButton", command=create).pack(
+            side="right", padx=(0, 8)
+        )
+        wizard.bind("<Escape>", lambda _event: wizard.destroy())
+        wizard.bind("<Return>", lambda _event: create())
+        wizard.grab_set()
+        if name_entry is not None:
+            name_entry.focus_set()
+
     def _refresh_metadata_choices(self) -> None:
         assert self.data is not None
         assignment_values = sorted(
@@ -991,18 +1590,29 @@ class SoldierEditor(tk.Tk):
         service_values = sorted(set(SERVICE_TYPES) | {self.data[self.record_start(i) + SERVICE_TYPE_OFFSET] for i in range(RECORD_COUNT)})
         sex_values = sorted({self.data[self.record_start(i) + SEX_OFFSET] for i in range(RECORD_COUNT)})
         self.soldier_type_box.configure(values=[enum_label(v, SOLDIER_TYPES) for v in type_values])
-        self.service_type_box.configure(values=[enum_label(v, SERVICE_TYPES) for v in service_values])
+        self.service_type_box.configure(values=[service_type_label(v) for v in service_values])
         self.sex_box.configure(values=[enum_label(v, SEXES) for v in sex_values])
         self.assignment_box.configure(values=[enum_label(value, ASSIGNMENTS) for value in assignment_values])
         self.assignment_filter_box.configure(
             values=["All assignments"] + [enum_label(value, ASSIGNMENTS) for value in assignment_values]
         )
-        self.description_slots = {
-            f"{slot + 1:03d} — {self.soldier_name(slot)}": slot
-            for slot in range(RECORD_COUNT)
-            if self.soldier_name(slot) != "<empty>"
-        }
-        self.description_box.configure(values=list(self.description_slots))
+        self.description_box.configure(values=list(self.quote_choices))
+
+    def _update_quote_control(self, _event=None) -> None:
+        try:
+            soldier_type = enum_value(self.soldier_type_var.get(), "Soldier class")
+        except ValueError:
+            return
+        fixed_quote_id = FIXED_CLASS_QUOTE_IDS.get(soldier_type)
+        if fixed_quote_id is not None:
+            label = self.quote_label_by_id.get(fixed_quote_id, f"{fixed_quote_id:03d} — Fixed character quote")
+            self.description_var.set(label)
+            self.description_box.configure(values=[label], state="disabled")
+            return
+        self.description_box.configure(values=list(self.quote_choices), state="readonly")
+        if self.loaded_quote_key:
+            quote_id = decode_regular_quote_id(self.loaded_quote_key)
+            self.description_var.set(self.quote_label_by_id.get(quote_id, ""))
 
     def clear_filters(self) -> None:
         self.assignment_filter_var.set("All assignments")
@@ -1014,21 +1624,55 @@ class SoldierEditor(tk.Tk):
         if self.data is None:
             return
         needle = self.search_var.get().casefold().strip()
+        assignment_filter = self.assignment_filter_var.get()
+        roster_names = {
+            self.soldier_name(slot).casefold() for slot in range(RECORD_COUNT)
+            if self.soldier_name(slot) != "<empty>"
+        }
+        if assignment_filter == "All assignments":
+            for special_name in SPECIAL_CHARACTER_NAMES:
+                if special_name.casefold() in roster_names:
+                    continue
+                if not needle or needle in special_name.casefold() or needle == "0":
+                    self.roster.insert("end", f"000  {special_name}")
         for slot in range(RECORD_COUNT):
             name = self.soldier_name(slot)
             start = self.record_start(slot)
             if needle and needle not in name.casefold() and needle not in str(slot + 1):
                 continue
-            assignment_filter = self.assignment_filter_var.get()
             # A typed name/slot search is global. This keeps story characters
             # and other special assignments from being hidden by a team filter.
             if not needle and assignment_filter != "All assignments" and self.data[start + ASSIGNMENT_OFFSET] != enum_value(assignment_filter, "Assignment filter"):
                 continue
             self.roster.insert("end", f"{slot + 1:03d}  {name}")
+        self._style_modified_roster_items()
         if needle and self.roster.size() == 1:
             self.roster.selection_set(0)
             self.roster.see(0)
             self.select_soldier()
+
+    def _style_modified_roster_items(self) -> None:
+        if not hasattr(self, "roster"):
+            return
+        dark = self.dark_mode_var.get()
+        normal_background = DARK_FIELD if dark else "white"
+        normal_foreground = DARK_INK if dark else INK
+        changed_background = RED if dark else "#000000"
+        changed_foreground = "#000000" if dark else "#ffffff"
+        for index in range(self.roster.size()):
+            line = self.roster.get(index)
+            try:
+                slot = int(line[:3]) - 1
+            except ValueError:
+                slot = -1
+            changed = slot in self.modified_slots
+            self.roster.itemconfigure(
+                index,
+                background=changed_background if changed else normal_background,
+                foreground=changed_foreground if changed else normal_foreground,
+                selectbackground=changed_background if changed else "#087bd3",
+                selectforeground=changed_foreground if changed else "white",
+            )
 
     def update_portrait_preview(self) -> None:
         choice = self.portrait_choice_var.get()
@@ -1106,11 +1750,72 @@ class SoldierEditor(tk.Tk):
             self.portrait_text.configure(image="", text="PORTRAIT")
             self.portrait_code.configure(text=choice)
 
+    def update_staff_tags(self) -> None:
+        """Display the finished acquisition tag bitmap."""
+        acquisition = self.service_type_var.get().split(" ", 1)[0].strip() or "???"
+        tag_filename = "Questionmark.png" if acquisition == "???" else f"{acquisition}.png"
+        canvas_colour = DARK_BG if self.dark_mode_var.get() else BG
+        image = Image.new("RGBA", (230, 100), canvas_colour)
+        tag_path = self.resource_root / "staff_tag_assets" / tag_filename
+        try:
+            tag_bitmap = Image.open(tag_path).convert("RGBA")
+            tag_bitmap.thumbnail((230, 95), Image.Resampling.LANCZOS)
+            tag_position = (
+                (230 - tag_bitmap.width) // 2,
+                (100 - tag_bitmap.height) // 2,
+            )
+            image.alpha_composite(tag_bitmap, tag_position)
+        except OSError:
+            pass
+        self.staff_tag_photo = ImageTk.PhotoImage(image.convert("RGB"))
+        self.staff_tag_panel.configure(image=self.staff_tag_photo)
+
+    def _paste_pw_text(
+        self, target: Image.Image, position: tuple[int, int], text: str,
+        scale: float, colour: str,
+    ) -> None:
+        """Compose text from the retail PC Staff screen's 16-pixel glyph atlas."""
+        atlas_path = self.resource_root / "staff_tag_assets" / "pw_staff_font.png"
+        try:
+            atlas = Image.open(atlas_path).convert("RGBA")
+        except OSError:
+            draw = ImageDraw.Draw(target)
+            draw.text(position, text, fill=colour, font=ImageFont.load_default())
+            return
+        glyph_size = 16
+        output_size = max(1, round(glyph_size * scale))
+        cursor_x, cursor_y = position
+        red, green, blue = Image.new("RGB", (1, 1), colour).getpixel((0, 0))
+        for character in text.upper():
+            code = ord(character)
+            if not 0x20 <= code <= 0x7F:
+                code = ord("?")
+            glyph_index = code - 0x20
+            # PC DXT storage rotates each 16-glyph row two cells to the left.
+            column = ((glyph_index & 0x0F) - 2) & 0x0F
+            row = glyph_index >> 4
+            glyph = atlas.crop((
+                column * glyph_size, row * glyph_size,
+                (column + 1) * glyph_size, (row + 1) * glyph_size,
+            ))
+            alpha = glyph.getchannel("A")
+            tinted = Image.new("RGBA", glyph.size, (red, green, blue, 0))
+            tinted.putalpha(alpha)
+            if output_size != glyph_size:
+                tinted = tinted.resize((output_size, output_size), Image.Resampling.NEAREST)
+            target.alpha_composite(tinted, (cursor_x, cursor_y))
+            cursor_x += output_size
+
     def select_soldier(self, _event=None) -> None:
         selection = self.roster.curselection()
         if not selection or self.data is None:
             return
+        self.loading_soldier = True
         line = self.roster.get(selection[0])
+        if line.startswith("000  "):
+            self._select_special_profile(line[5:])
+            self.loading_soldier = False
+            return
         slot = int(line[:3]) - 1
         self.selected_slot = slot
         start = self.record_start(slot)
@@ -1120,24 +1825,19 @@ class SoldierEditor(tk.Tk):
         portrait_pair = (record[PORTRAIT_SET_OFFSET], record[PORTRAIT_FACE_OFFSET])
         self.portrait_choice_var.set(self.portrait_choice_by_code.get(portrait_pair, "Portrait unavailable"))
         self.soldier_type_var.set(enum_label(record[SOLDIER_TYPE_OFFSET], SOLDIER_TYPES))
-        self.service_type_var.set(enum_label(record[SERVICE_TYPE_OFFSET], SERVICE_TYPES))
+        self.service_type_var.set(service_type_label(record[SERVICE_TYPE_OFFSET]))
         self.sex_var.set(enum_label(record[SEX_OFFSET], SEXES))
-        self.unit_title_var.set(enum_label(record[UNIT_TITLE_OFFSET], UNIT_TITLES))
-        self.voice_var.set(enum_label(record[VOICE_OFFSET], VOICES))
-        self.acquisition_method_var.set(
-            enum_label(record[ACQUISITION_METHOD_OFFSET], ACQUISITION_METHODS)
-        )
         condition_flags = record[CONDITION_FLAGS_OFFSET]
         self.condition_var.set(
             "Condition: Normal (read-only)"
             if condition_flags == 0
             else "Condition: Sick/wounded state detected (read-only)"
         )
-        own_description = f"{slot + 1:03d} — {self.soldier_name(slot)}"
-        self.description_var.set(own_description)
-        self.custom_description_text.delete("1.0", "end")
-        self.custom_description_text.insert("1.0", self.custom_quotes.get(slot, ""))
+        self.loaded_quote_key = bytes(record[QUOTE_KEY_OFFSET:QUOTE_KEY_OFFSET + QUOTE_KEY_SIZE])
+        self._update_quote_control()
+        self._show_custom_quote(slot)
         self.update_portrait_preview()
+        self.update_staff_tags()
         self.life_var.set(str(int.from_bytes(record[LIFE_MAX_OFFSET:LIFE_MAX_OFFSET + 2], "little")))
         self.psyche_var.set(str(int.from_bytes(record[PSYCHE_MAX_OFFSET:PSYCHE_MAX_OFFSET + 2], "little")))
         self.gmp_var.set(str(int.from_bytes(record[GMP_OFFSET:GMP_OFFSET + 2], "little")))
@@ -1170,10 +1870,55 @@ class SoldierEditor(tk.Tk):
             lines.append(f"{offset:02X}: " + " ".join(f"{value:02X}" for value in chunk))
         self.raw_text.delete("1.0", "end")
         self.raw_text.insert("1.0", "\n".join(lines))
+        draft = self.soldier_drafts.get(slot)
+        if draft is not None:
+            self._restore_soldier_form(draft)
+            self.update_portrait_preview()
+            self.update_staff_tags()
+            self._show_skill_description(0)
+        self.loading_soldier = False
+
+    def _select_special_profile(self, name: str) -> None:
+        """Display a unique character without inventing a staff-table record."""
+        self.selected_slot = -1
+        self.name_var.set(name)
+        self.assignment_var.set("Combat Unit" if name == "SNAKE" else "Unassigned")
+        portrait_pair = SPECIAL_CHARACTER_PORTRAITS.get(name)
+        portrait_label = SPECIAL_PORTRAIT_NAMES.get(portrait_pair) if portrait_pair else None
+        self.portrait_choice_var.set(portrait_label or "Portrait unavailable")
+        self.soldier_type_var.set("Commander" if name == "SNAKE" else "")
+        self.service_type_var.set("UNQ — Unique character")
+        self.sex_var.set("Male")
+        self.description_var.set("")
+        self.description_box.configure(state="disabled")
+        self.condition_var.set("Unique character — not stored in the 350-record staff table")
+        self._show_custom_quote(None)
+        for variable in (
+            self.life_var, self.psyche_var, self.gmp_var,
+            self.hostility_var, self.morale_var,
+            self.combat_score_var, *self.team_score_vars.values(),
+            *self.battle_score_vars.values(),
+        ):
+            variable.set("")
+        for variable in self.skill_vars:
+            variable.set("None")
+        self.skill_description_var.set(
+            f"{name} is a unique character, not a recruit record. Character-specific data is stored separately."
+        )
+        self.raw_text.delete("1.0", "end")
+        self.update_portrait_preview()
+        self.update_staff_tags()
+        self.status_var.set(f"{name} — unique character profile (read-only in the Soldier Editor)")
 
     def apply_fields(self) -> None:
         if self.data is None or self.selected_slot is None:
             messagebox.showinfo("No soldier selected", "Select a soldier first.")
+            return
+        if self.selected_slot == -1:
+            messagebox.showinfo(
+                "Unique character",
+                "This character is stored outside the 350-record staff roster and cannot be safely edited as a normal soldier.",
+            )
             return
         try:
             encoded_name = self.name_var.get().encode("ascii")
@@ -1185,12 +1930,16 @@ class SoldierEditor(tk.Tk):
                 raise ValueError("Choose an available portrait")
             portrait_set, portrait_face = self.portrait_choices[portrait_choice]
             soldier_type = enum_value(self.soldier_type_var.get(), "Soldier class")
-            service_type = enum_value(self.service_type_var.get(), "Recruitment category")
+            service_type = enum_value(self.service_type_var.get(), "Acquisition method")
             sex = enum_value(self.sex_var.get(), "Sex")
-            unit_title = enum_value(self.unit_title_var.get(), "Unit title")
-            voice = enum_value(self.voice_var.get(), "Voice profile")
-            acquisition_method = enum_value(self.acquisition_method_var.get(), "Acquisition method")
-            description_slot = self.description_slots[self.description_var.get()]
+            fixed_quote_id = FIXED_CLASS_QUOTE_IDS.get(soldier_type)
+            if fixed_quote_id is None:
+                quote_label = self.description_var.get()
+                if quote_label not in self.quote_choices:
+                    raise ValueError("Choose an available Details Quote")
+                quote_key = encode_regular_quote_id(self.quote_choices[quote_label], self.loaded_quote_key)
+            else:
+                quote_key = self.loaded_quote_key
             custom_description = self.custom_description_text.get("1.0", "end-1c").strip()
             try:
                 custom_description_bytes = custom_description.encode("utf-8")
@@ -1230,9 +1979,6 @@ class SoldierEditor(tk.Tk):
         self.data[start + SOLDIER_TYPE_OFFSET] = soldier_type
         self.data[start + SERVICE_TYPE_OFFSET] = service_type
         self.data[start + SEX_OFFSET] = sex
-        self.data[start + UNIT_TITLE_OFFSET] = unit_title
-        self.data[start + VOICE_OFFSET] = voice
-        self.data[start + ACQUISITION_METHOD_OFFSET] = acquisition_method
         life_bytes = life.to_bytes(2, "little")
         psyche_bytes = psyche.to_bytes(2, "little")
         self.data[start + LIFE_CURRENT_OFFSET : start + LIFE_CURRENT_OFFSET + 2] = life_bytes
@@ -1248,11 +1994,12 @@ class SoldierEditor(tk.Tk):
         for name, score in battle_scores.items():
             offset = start + BATTLE_GRADE_OFFSETS[name]
             self.data[offset:offset + 2] = score.to_bytes(2, "little")
-        donor = self.record_start(description_slot) + DESCRIPTION_KEY_OFFSET
-        self.data[start + DESCRIPTION_KEY_OFFSET : start + DESCRIPTION_KEY_OFFSET + DESCRIPTION_KEY_SIZE] = self.data[
-            donor : donor + DESCRIPTION_KEY_SIZE
-        ]
+        self.data[start + QUOTE_KEY_OFFSET : start + QUOTE_KEY_OFFSET + QUOTE_KEY_SIZE] = quote_key
         if custom_description:
+            selection = self.custom_quote_template_var.get() or "Custom 001"
+            self.custom_quote_template_var.set(selection)
+            self.custom_quote_selections[self.selected_slot] = selection
+            self.custom_quote_drafts.setdefault(self.selected_slot, {})[selection] = custom_description
             self.custom_quotes[self.selected_slot] = custom_description
         else:
             self.custom_quotes.pop(self.selected_slot, None)
@@ -1260,6 +2007,8 @@ class SoldierEditor(tk.Tk):
         if encoded_name:
             self.ensure_roster_includes(self.selected_slot)
         self.dirty = True
+        self.modified_slots.add(self.selected_slot)
+        self.soldier_drafts.pop(self.selected_slot, None)
         slot = self.selected_slot
         self.refresh_list()
         self._select_slot(slot)
@@ -1270,6 +2019,8 @@ class SoldierEditor(tk.Tk):
 
     def _load_custom_quotes(self, save_path: Path) -> None:
         self.custom_quotes = {}
+        self.custom_quote_selections = {}
+        self.custom_quote_drafts = {}
         sidecar = self._custom_quote_sidecar(save_path)
         if not sidecar.is_file():
             return
@@ -1281,6 +2032,36 @@ class SoldierEditor(tk.Tk):
                 text = str(item.get("text", "")).strip()
                 if 0 <= slot < RECORD_COUNT and text:
                     self.custom_quotes[slot] = text
+                    selection = str(item.get("template", "Custom 001"))
+                    if selection in self.custom_quote_templates:
+                        self.custom_quote_selections[slot] = selection
+                        drafts = item.get("templates", {})
+                        if isinstance(drafts, dict):
+                            valid_drafts = {
+                                str(label): str(value)
+                                for label, value in drafts.items()
+                                if str(label) in self.custom_quote_templates and str(value)
+                            }
+                        else:
+                            valid_drafts = {}
+                        valid_drafts.setdefault(selection, text)
+                        self.custom_quote_drafts[slot] = valid_drafts
+            draft_records = payload.get("drafts", {})
+            if isinstance(draft_records, dict):
+                for slot_text, item in draft_records.items():
+                    slot = int(slot_text) - 1
+                    if not 0 <= slot < RECORD_COUNT or not isinstance(item, dict):
+                        continue
+                    selection = str(item.get("selected", ""))
+                    templates = item.get("templates", {})
+                    if selection in self.custom_quote_templates:
+                        self.custom_quote_selections[slot] = selection
+                    if isinstance(templates, dict):
+                        self.custom_quote_drafts[slot] = {
+                            str(label): str(value)
+                            for label, value in templates.items()
+                            if str(label) in self.custom_quote_templates and str(value)
+                        }
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             messagebox.showwarning(
                 "Custom quote file",
@@ -1294,19 +2075,15 @@ class SoldierEditor(tk.Tk):
         for slot, text in sorted(self.custom_quotes.items()):
             start = self.record_start(slot)
             selector = bytes(self.data[start + DESCRIPTION_KEY_OFFSET : start + DESCRIPTION_KEY_OFFSET + 4])
-            # The current PC build resolves a Details Quote by adding six to
-            # the first selector byte before calling the localized text resolver.
-            runtime_index = selector[0] + 6
-            existing = entries.get(runtime_index)
-            if existing is not None and existing["text"] != text:
-                raise ValueError(
-                    f"Slots {existing['slot']} and {slot + 1} use the same Details Quote donor. "
-                    "Choose a different donor for one of them."
-                )
-            entries[runtime_index] = {
+            # The PC build decodes the runtime quote index by subtracting the
+            # selector's second byte from its first byte (for example,
+            # CB 16 E2 00 resolves to B5 / 181).
+            runtime_index = (selector[0] - selector[1]) & 0xFF
+            entries[slot] = {
                 "slot": slot + 1,
                 "name": self.soldier_name(slot),
                 "selector": selector.hex(),
+                "runtime_index": runtime_index,
                 "text": text,
             }
         return entries
@@ -1314,21 +2091,34 @@ class SoldierEditor(tk.Tk):
     def _write_custom_quote_sidecar(self, save_path: Path) -> Path | None:
         entries = self._runtime_quote_entries()
         sidecar = self._custom_quote_sidecar(save_path)
-        if not entries:
+        draft_slots = set(self.custom_quote_selections) | set(self.custom_quote_drafts)
+        if not entries and not draft_slots:
             if sidecar.exists():
                 sidecar.unlink()
             return None
         soldiers = {
-            str(item["slot"]): {
+            str(slot + 1): {
                 "name": item["name"],
                 "selector": item["selector"],
-                "runtime_index": runtime_index,
+                "runtime_index": item["runtime_index"],
                 "text": item["text"],
+                "template": self.custom_quote_selections.get(slot, "Custom 001"),
+                "templates": self.custom_quote_drafts.get(slot, {}),
             }
-            for runtime_index, item in entries.items()
+            for slot, item in entries.items()
+        }
+        drafts = {
+            str(slot + 1): {
+                "selected": self.custom_quote_selections.get(slot, ""),
+                "templates": self.custom_quote_drafts.get(slot, {}),
+            }
+            for slot in sorted(draft_slots)
         }
         sidecar.write_text(
-            json.dumps({"version": 1, "save": save_path.name, "soldiers": soldiers}, indent=2) + "\n",
+            json.dumps(
+                {"version": 1, "save": save_path.name, "soldiers": soldiers, "drafts": drafts},
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
         return sidecar
@@ -1391,6 +2181,7 @@ class SoldierEditor(tk.Tk):
         if record[NAME_OFFSET : NAME_OFFSET + NAME_SIZE].split(b"\0", 1)[0]:
             self.ensure_roster_includes(self.selected_slot)
         self.dirty = True
+        self.modified_slots.add(self.selected_slot)
         slot = self.selected_slot
         self.refresh_list()
         self._select_slot(slot)
@@ -1405,9 +2196,40 @@ class SoldierEditor(tk.Tk):
                 self.select_soldier()
                 break
 
+    def _apply_pending_soldier_drafts(self) -> bool:
+        """Commit every valid form draft before the save bytes are assembled."""
+        if not self.soldier_drafts:
+            return True
+
+        original_filter = self.assignment_filter_var.get()
+        original_search = self.search_var.get()
+        original_slot = self.selected_slot
+
+        # Drafts may belong to soldiers hidden by the current roster filters.
+        self.assignment_filter_var.set("All assignments")
+        self.search_var.set("")
+        self.refresh_list()
+
+        for slot in sorted(tuple(self.soldier_drafts)):
+            self._select_slot(slot)
+            self.apply_fields()
+            if slot in self.soldier_drafts:
+                # apply_fields already explains the invalid field. Keep this
+                # soldier visible so the user can correct it.
+                return False
+
+        self.assignment_filter_var.set(original_filter)
+        self.search_var.set(original_search)
+        self.refresh_list()
+        if original_slot is not None and original_slot >= 0:
+            self._select_slot(original_slot)
+        return True
+
     def save_as(self) -> None:
         if self.data is None or self.source_path is None or self.header_index is None:
             messagebox.showinfo("No save open", "Open a PC STW save first.")
+            return
+        if not self._apply_pending_soldier_drafts():
             return
         candidate = bytearray(self.data)
         # The game only scans this many records. Rebuild the boundary at save
@@ -1439,10 +2261,40 @@ class SoldierEditor(tk.Tk):
         if not path_text:
             return
         output = Path(path_text)
-        if output.resolve() == self.source_path.resolve():
+        source_resolved = self.source_path.resolve()
+        output_resolved = output.resolve()
+        if output.parent.name.casefold() == "ww":
+            backup_dir = output.parent / "Backup Saves"
+            backup_dir.mkdir(exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_sources = [self.source_path]
+            if output.exists() and output_resolved != source_resolved:
+                backup_sources.append(output)
+            for backup_source in backup_sources:
+                backup_assets = [backup_source, self._custom_quote_sidecar(backup_source)]
+                for backup_asset in backup_assets:
+                    if not backup_asset.exists():
+                        continue
+                    backup = backup_dir / f"{backup_asset.name}_{stamp}.backup"
+                    counter = 2
+                    while backup.exists():
+                        backup = backup_dir / f"{backup_asset.name}_{stamp}_{counter}.backup"
+                        counter += 1
+                    shutil.copy2(backup_asset, backup)
+        elif output_resolved == source_resolved:
             backup = self.source_path.with_name(self.source_path.name + ".backup")
             shutil.copy2(self.source_path, backup)
         output.write_bytes(candidate)
+
+        # When the checksum changes the filename, keep only the newly saved
+        # file in ww. The original remains recoverable from Backup Saves.
+        if (
+            output.parent.name.casefold() == "ww"
+            and source_resolved.parent == output_resolved.parent
+            and source_resolved != output_resolved
+            and self.source_path.exists()
+        ):
+            self.source_path.unlink()
         try:
             sidecar = self._write_custom_quote_sidecar(output)
         except (OSError, ValueError) as exc:
@@ -1451,7 +2303,19 @@ class SoldierEditor(tk.Tk):
                 f"The save was written, but its custom quote file could not be written.\n\n{exc}",
             )
             return
+        source_sidecar = self._custom_quote_sidecar(self.source_path)
+        output_sidecar = self._custom_quote_sidecar(output)
+        if (
+            output.parent.name.casefold() == "ww"
+            and source_resolved.parent == output_resolved.parent
+            and source_sidecar.resolve() != output_sidecar.resolve()
+            and source_sidecar.exists()
+        ):
+            source_sidecar.unlink()
+        self.modified_slots.clear()
+        self.soldier_drafts.clear()
         self.dirty = False
+        self._style_modified_roster_items()
         messagebox.showinfo(
             "Save written",
             f"Saved {output.name}"

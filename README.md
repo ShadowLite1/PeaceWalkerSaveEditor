@@ -14,18 +14,30 @@ PTB means public test build. Back up your save before editing it.
 - Provides a Play button for each voice profile when its authentic preview WAV is included.
 - Filters and searches the staff roster, including unique characters.
 - Exports a soldier and imports one into an empty roster slot from the right-click menu.
+- Creates new soldiers through **File > Create Soldier**, automatically using the first vacant roster slot.
+- Tracks unsaved changes per soldier and clears their roster highlights after a successful save.
+- Includes persistent light and dark appearance modes.
 - Supports persistent per-soldier custom Details Quotes through an optional ASI plugin.
 - Includes the portrait pack used by the PTB release.
 
 ## Use the editor
 
 1. Close Peace Walker before editing a save.
-2. Make a backup copy of the save.
+2. Keep an independent backup of important saves.
 3. Start `PeaceWalkerSoldierEditor_PTB.exe`.
 4. Select **Open Save** and choose the encrypted PC `STW` file.
 5. Select a soldier, make changes, and choose **Apply Soldier Changes**.
-6. Choose **Save As** and write the edited file to a new location first.
-7. After confirming the edited save works, replace the original if desired.
+6. Choose **Save As**. When saving directly into the game's `ww` folder, the editor places timestamped backups of the prior save and matching `.pwquotes.json` file in `ww\Backup Saves`.
+7. Start the game and confirm the edited save works.
+
+To add a soldier, choose **File > Create Soldier**. The wizard validates the entered values and automatically selects the first vacant roster slot.
+
+### Saves converted from PSP or PS3
+
+The editor recognizes the PC files created by the **Transfarring mod**, including
+the 16-byte suffix added to converted PSP/PS3 saves. This suffix is preserved
+when the edited save is written. Older editor builds rejected these files as
+being 16 bytes larger than a standard PC save.
 
 For soldier transfers, right-click a populated roster entry and select **Export Soldier**. To import it, right-click an empty slot and select **Import Soldier**.
 
@@ -37,9 +49,9 @@ The condition indicator is intentionally read-only. The save contains a compact 
 
 Choose a Voice Profile and select **Play** to hear its bundled sample. Authentic preview files use the names `voice_01.wav` through `voice_09.wav` in the `voice_previews` folder. If a profile has not been captured yet, the editor reports that the preview is unavailable.
 
-### Custom Details Quotes
+### Custom Quotes
 
-1. Select a soldier and type text into **Custom Details Quote (optional)**.
+1. Select a soldier, choose a **Custom** slot, and type text into **Custom Quote (optional)**.
 2. Choose **Apply Soldier Changes**, then **Save As**.
 3. Keep the generated `.pwquotes.json` file beside the edited save. It stores the custom text because arbitrary quote text cannot be embedded directly in the normal soldier record.
 4. Choose **Install Custom Quote Support** once and select the real Peace Walker executable. MGSPatriotFix or another compatible ASI loader must already be installed.

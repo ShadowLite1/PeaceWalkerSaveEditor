@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -27,11 +28,13 @@ using StringCopy = void* (__fastcall*)(void*, void*, const char*, uintptr_t);
 
 QuoteResolver g_original_resolver = nullptr;
 StringCopy g_original_copy = nullptr;
-std::unordered_map<uint32_t, std::string> g_quotes;
+std::unordered_map<std::string, std::string> g_quotes;
 std::mutex g_quotes_mutex;
 std::atomic_bool g_running{true};
 thread_local uint32_t g_active_quote = 0;
 thread_local bool g_has_active_quote = false;
+thread_local std::string g_active_soldier_name;
+std::string g_last_soldier_name;
 fs::path g_loaded_sidecar;
 fs::file_time_type g_loaded_write_time{};
 
@@ -67,18 +70,18 @@ std::string DecodeJsonString(const std::string& value) {
     return result;
 }
 
-bool ParseSidecar(const fs::path& path, std::unordered_map<uint32_t, std::string>& quotes) {
+bool ParseSidecar(const fs::path& path, std::unordered_map<std::string, std::string>& quotes) {
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     std::ostringstream buffer;
     buffer << input.rdbuf();
     const std::string json = buffer.str();
     const std::regex entry(
-        R"quote("runtime_index"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)")quote",
+        R"quote("name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"selector"\s*:\s*"[^"]*"\s*,\s*"runtime_index"\s*:\s*\d+\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)")quote",
         std::regex::ECMAScript);
     for (std::sregex_iterator it(json.begin(), json.end(), entry), end; it != end; ++it) {
-        const auto index = static_cast<uint32_t>(std::stoul((*it)[1].str()));
-        quotes[index] = DecodeJsonString((*it)[2].str());
+        const std::string name = DecodeJsonString((*it)[1].str());
+        quotes[name] = DecodeJsonString((*it)[2].str());
     }
     return !quotes.empty();
 }
@@ -117,7 +120,7 @@ void RefreshQuotes() {
     const auto write_time = fs::last_write_time(sidecar, error);
     if (error || (sidecar == g_loaded_sidecar && write_time == g_loaded_write_time)) return;
 
-    std::unordered_map<uint32_t, std::string> parsed;
+    std::unordered_map<std::string, std::string> parsed;
     if (!ParseSidecar(sidecar, parsed)) {
         Log("Could not parse custom quote file: " + sidecar.string());
         return;
@@ -134,31 +137,43 @@ void RefreshQuotes() {
 void* __fastcall HookQuoteResolver(void* first, void* second, uint32_t index, void* fourth) {
     const uint32_t previous_index = g_active_quote;
     const bool previous_active = g_has_active_quote;
+    std::string previous_name = std::move(g_active_soldier_name);
     g_active_quote = index;
     g_has_active_quote = true;
+    g_active_soldier_name.clear();
     void* result = g_original_resolver(first, second, index, fourth);
     g_active_quote = previous_index;
     g_has_active_quote = previous_active;
+    g_active_soldier_name = std::move(previous_name);
     return result;
 }
 
-bool IsDetailsQuoteDestination(const void* destination) {
+uint16_t SafeReadWord(const void* address) noexcept {
     __try {
-        return destination != nullptr && *static_cast<const uint16_t*>(destination) == 0x00ff;
+        return address ? *static_cast<const uint16_t*>(address) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return 0;
     }
 }
 
 void* __fastcall HookStringCopy(void* first, void* destination, const char* text, uintptr_t fourth) {
-    if (g_has_active_quote && IsDetailsQuoteDestination(destination)) {
-            thread_local std::string replacement;
-            std::lock_guard lock(g_quotes_mutex);
-            const auto found = g_quotes.find(g_active_quote);
-            if (found != g_quotes.end()) {
-                replacement = found->second;
-                text = replacement.c_str();
-            }
+    const uint16_t destination_marker = SafeReadWord(destination);
+    if (text != nullptr && fourth == 80 && destination_marker == 29) {
+        g_active_soldier_name = text;
+        std::lock_guard lock(g_quotes_mutex);
+        g_last_soldier_name = text;
+    } else if (text != nullptr && fourth == 80 && destination_marker == 255) {
+        thread_local std::string replacement;
+        std::lock_guard lock(g_quotes_mutex);
+        const std::string& soldier_name = g_active_soldier_name.empty()
+            ? g_last_soldier_name
+            : g_active_soldier_name;
+        const auto found = g_quotes.find(soldier_name);
+        if (found != g_quotes.end()) {
+            replacement = found->second;
+            text = replacement.c_str();
+            Log("Applied custom quote for soldier " + soldier_name);
+        }
     }
     return g_original_copy(first, destination, text, fourth);
 }

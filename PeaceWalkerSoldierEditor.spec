@@ -3,7 +3,11 @@ from pathlib import Path
 
 
 project_dir = Path(SPECPATH)
-datas = [(str(project_dir / "portrait_assets"), "portrait_assets")]
+datas = [
+    (str(project_dir / "portrait_assets"), "portrait_assets"),
+    (str(project_dir / "staff_tag_assets"), "staff_tag_assets"),
+    (str(project_dir / "quote_assets"), "quote_assets"),
+]
 
 voice_previews = project_dir / "voice_previews"
 if voice_previews.exists():

@@ -3,7 +3,9 @@ __pycache__/
 .venv/
 venv/
 build/
+build_*/
 dist/
+dist_*/
 *.STW
 *.stw
 *.backup
