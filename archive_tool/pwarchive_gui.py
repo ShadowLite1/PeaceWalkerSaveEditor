@@ -21,6 +21,7 @@ class ArchiveApp(tk.Tk):
         self.minsize(700, 520)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.busy = False
+        self.archive_paths: list[Path] = []
         self._build()
         self.after(100, self._poll_events)
 
@@ -72,7 +73,7 @@ class ArchiveApp(tk.Tk):
         self.output_var = tk.StringVar()
         self.key_var = tk.StringVar()
         self.format_var = tk.StringVar(value="Automatic")
-        self._row(self.extract_tab, 0, "Archive", self.archive_var, self._choose_archive)
+        self._row(self.extract_tab, 0, "Archive(s)", self.archive_var, self._choose_archive, "Add files…")
         self._row(self.extract_tab, 1, "Output folder", self.output_var, self._choose_output)
         self._row(self.extract_tab, 2, "SLOT.KEY", self.key_var, self._choose_key, "Optional…")
         options = ttk.Frame(self.extract_tab)
@@ -113,14 +114,20 @@ class ArchiveApp(tk.Tk):
         )
 
     def _choose_archive(self) -> None:
-        path = filedialog.askopenfilename(title="Choose a Peace Walker archive", filetypes=(
+        paths = filedialog.askopenfilenames(title="Choose Peace Walker archives", filetypes=(
             ("Peace Walker archives", "*.PDT *.DAT *.dar *.qar *.xpr"), ("All files", "*.*")))
-        if path:
-            self.archive_var.set(path)
-            source = Path(path)
-            self.output_var.set(str(source.with_name(source.stem + "_extracted")))
-            if source.name.lower() == "002aba34.dat":
-                candidate = source.with_suffix(".KEY")
+        if paths:
+            self.archive_paths = [Path(path) for path in paths]
+            if len(self.archive_paths) == 1:
+                source = self.archive_paths[0]
+                self.archive_var.set(str(source))
+                self.output_var.set(str(source.with_name(source.stem + "_extracted")))
+            else:
+                self.archive_var.set(f"{len(self.archive_paths)} archives selected")
+                self.output_var.set(str(self.archive_paths[0].parent))
+            slot_sources = [source for source in self.archive_paths if source.name.lower() == "002aba34.dat"]
+            if len(slot_sources) == 1:
+                candidate = slot_sources[0].with_suffix(".KEY")
                 if candidate.exists(): self.key_var.set(str(candidate))
 
     def _choose_output(self) -> None:
@@ -206,35 +213,48 @@ class ArchiveApp(tk.Tk):
         self.after(100, self._poll_events)
 
     def _extract(self) -> None:
-        source, output = Path(self.archive_var.get()), Path(self.output_var.get())
-        if not source.is_file(): messagebox.showerror(APP_TITLE, "Choose an archive file first."); return
+        sources = list(self.archive_paths)
+        if not sources:
+            manual_source = Path(self.archive_var.get())
+            if manual_source.is_file(): sources = [manual_source]
+        if not sources or any(not source.is_file() for source in sources):
+            messagebox.showerror(APP_TITLE, "Choose one or more archive files first."); return
+        output = Path(self.output_var.get())
         if not str(output): messagebox.showerror(APP_TITLE, "Choose an output folder."); return
-        try: fmt = self._detect_format(source)
-        except ValueError as exc: messagebox.showerror(APP_TITLE, str(exc)); return
+        selected_format = self.format_var.get()
         def task():
-            if fmt == "dar": pwarchive.extract_dar(source, output)
-            elif fmt == "qar": pwarchive.extract_qar(source, output, 0x80)
-            elif fmt == "pdt":
-                pwarchive.extract_pdt(
-                    source, output,
-                    progress=lambda text: self.events.put(("progress", text)),
-                )
-            elif fmt == "stage":
-                pwarchive.extract_stage(
-                    source, output,
-                    progress=lambda text: self.events.put(("progress", text)),
-                )
-            elif fmt == "slot":
-                key = Path(self.key_var.get())
-                if not key.is_file(): raise ValueError("SLOT extraction requires the matching SLOT.KEY file.")
-                pwarchive.extract_slot(
-                    source, key, output, 0x1000,
-                    progress=lambda text: self.events.put(("progress", text)),
-                )
-            elif fmt == "pc-resource": pwarchive.extract_pc_resource(source, output)
-            elif fmt == "xpr": pwarchive.extract_xpr2(source, output)
-            return f"Extracted {source.name} to {output}"
-        self._run(f"Extracting {source.name}…", task)
+            completed, failures = [], []
+            for index, source in enumerate(sources, 1):
+                destination = output if len(sources) == 1 else output / f"{source.stem}_extracted"
+                self.events.put(("progress", f"Extracting {index}/{len(sources)}: {source.name}…"))
+                try:
+                    if selected_format == "Automatic":
+                        fmt, _ = pwarchive.classify_pc_resource(source)
+                        if fmt == "unknown":
+                            raise ValueError("This file is not a recognized Peace Walker PC resource.")
+                    else:
+                        fmt = selected_format.lower().replace("stagedat", "stage").replace(" ", "-")
+                    if fmt == "dar": pwarchive.extract_dar(source, destination)
+                    elif fmt == "qar": pwarchive.extract_qar(source, destination, 0x80)
+                    elif fmt == "pdt":
+                        pwarchive.extract_pdt(source, destination, progress=lambda text: self.events.put(("progress", text)))
+                    elif fmt == "stage":
+                        pwarchive.extract_stage(source, destination, progress=lambda text: self.events.put(("progress", text)))
+                    elif fmt == "slot":
+                        key = Path(self.key_var.get())
+                        if not key.is_file(): raise ValueError("SLOT extraction requires the matching SLOT.KEY file.")
+                        pwarchive.extract_slot(source, key, destination, 0x1000,
+                                               progress=lambda text: self.events.put(("progress", text)))
+                    elif fmt == "pc-resource": pwarchive.extract_pc_resource(source, destination)
+                    elif fmt == "xpr": pwarchive.extract_xpr2(source, destination)
+                    completed.append(source.name)
+                except Exception as exc:
+                    failures.append(f"{source.name}: {exc}")
+            result = f"Extracted {len(completed)} of {len(sources)} archives."
+            if failures:
+                result += "\n\nFailed:\n" + "\n".join(failures)
+            return result
+        self._run(f"Extracting {len(sources)} archive{'s' if len(sources) != 1 else ''}…", task)
 
     def _repack(self) -> None:
         folder, output = Path(self.folder_var.get()), Path(self.repack_output_var.get())

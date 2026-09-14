@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import tkinter as tk
+import ctypes
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -18,6 +19,9 @@ except ImportError:  # pragma: no cover - the editor is distributed for Windows
 from edit_save import update_internal_checks
 from save_cipher import derive_state, filename_checksum, transform
 
+
+PROLOGUE_REGULAR = "Prologue Atlas"
+PROLOGUE_EXPANDED = "Prologue Atlas Expanded"
 
 SAVE_SIZE = 0x4F950
 TRANSFARRING_SUFFIX_SIZE = 0x10
@@ -90,7 +94,7 @@ SPECIAL_CHARACTER_PORTRAITS = {
     "ZADORNOV": (0x4A, 0x92),
     "STRANGELOVE": (0x4C, 0x92),
     "MILLER": (0x4B, 0x92),
-    "CÉCILE": (0x4D, 0x92),
+    "CECILE": (0x4D, 0x92),
 }
 SPECIAL_PORTRAIT_NAMES = {
     pair: name.title() for name, pair in SPECIAL_CHARACTER_PORTRAITS.items()
@@ -101,7 +105,7 @@ SPECIAL_CHARACTER_NAMES = (
     "AMANDA",
     "CHICO",
     "HUEY",
-    "CÉCILE",
+    "CECILE",
     "STRANGELOVE",
     "PAZ",
 )
@@ -452,6 +456,7 @@ class SoldierEditor(tk.Tk):
         self.loading_soldier = False
 
         self.resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        self._load_app_fonts()
         self._load_quote_library()
         app_icon = self.resource_root / "app_icon.ico"
         if app_icon.is_file():
@@ -497,6 +502,16 @@ class SoldierEditor(tk.Tk):
         self._build_ui()
         self._bind_soldier_change_tracking()
         self._apply_appearance()
+
+    def _load_app_fonts(self) -> None:
+        """Register bundled fonts for this process without installing them system-wide."""
+        if sys.platform != "win32":
+            return
+        add_font = ctypes.windll.gdi32.AddFontResourceExW
+        for filename in ("PrologueAtlas-Regular.ttf", "PrologueAtlas-Expanded.ttf"):
+            path = self.resource_root / "font_assets" / filename
+            if path.is_file():
+                add_font(str(path), 0x10, None)  # FR_PRIVATE
 
     def _editable_soldier_variables(self) -> list[tk.StringVar]:
         return [
@@ -614,17 +629,17 @@ class SoldierEditor(tk.Tk):
         except tk.TclError:
             pass
         style.configure("PW.TFrame", background=BG)
-        style.configure("TLabel", font=("Segoe UI", 10))
-        style.configure("TButton", font=("Segoe UI", 10))
-        style.configure("TEntry", font=("Segoe UI", 10))
-        style.configure("TCombobox", font=("Segoe UI", 10))
-        style.configure("PW.TLabel", background=BG, foreground=INK, font=("Segoe UI", 11))
-        style.configure("Title.TLabel", background=BG, foreground=INK, font=("Segoe UI", 22))
-        style.configure("Sub.TLabel", background=BG, foreground=INK, font=("Segoe UI", 13))
-        style.configure("Panel.TLabel", background=PANEL, foreground=CREAM, font=("Segoe UI", 11))
-        style.configure("Red.TLabel", background=RED, foreground="white", font=("Segoe UI", 12, "bold"))
-        style.configure("Orange.TLabel", background=ORANGE, foreground="white", font=("Segoe UI", 12, "bold"))
-        style.configure("PW.TButton", font=("Segoe UI", 10, "bold"), padding=7)
+        style.configure("TLabel", font=(PROLOGUE_REGULAR, 10))
+        style.configure("TButton", font=(PROLOGUE_REGULAR, 10))
+        style.configure("TEntry", font=(PROLOGUE_REGULAR, 10))
+        style.configure("TCombobox", font=(PROLOGUE_REGULAR, 10))
+        style.configure("PW.TLabel", background=BG, foreground=INK, font=(PROLOGUE_REGULAR, 11))
+        style.configure("Title.TLabel", background=BG, foreground=INK, font=(PROLOGUE_EXPANDED, 22))
+        style.configure("Sub.TLabel", background=BG, foreground=INK, font=(PROLOGUE_EXPANDED, 13))
+        style.configure("Panel.TLabel", background=PANEL, foreground=CREAM, font=(PROLOGUE_REGULAR, 11))
+        style.configure("Red.TLabel", background=RED, foreground="white", font=(PROLOGUE_EXPANDED, 12))
+        style.configure("Orange.TLabel", background=ORANGE, foreground="white", font=(PROLOGUE_EXPANDED, 12))
+        style.configure("PW.TButton", font=(PROLOGUE_REGULAR, 10), padding=7)
 
     def _apply_appearance(self) -> None:
         dark = self.dark_mode_var.get()
@@ -665,6 +680,7 @@ class SoldierEditor(tk.Tk):
             )
 
         def recolor(widget: tk.Misc) -> None:
+            background = ""
             try:
                 background = str(widget.cget("background")).lower()
                 if background in (BG.lower(), DARK_BG.lower()):
@@ -677,7 +693,11 @@ class SoldierEditor(tk.Tk):
                 pass
             try:
                 foreground = str(widget.cget("foreground")).lower()
-                if foreground in (
+                if background in (PANEL.lower(), "#1f211e", "#20221f"):
+                    # These panels stay dark in both appearances and therefore
+                    # always need light text, including when switching themes.
+                    widget.configure(foreground=CREAM)
+                elif foreground in (
                     INK.lower(), DARK_INK.lower(), "#11120f", "black",
                     "systemwindowtext", "systembuttontext"
                 ):
@@ -764,7 +784,7 @@ class SoldierEditor(tk.Tk):
 
         list_frame = ttk.Frame(left)
         list_frame.pack(fill="both", expand=True)
-        self.roster = tk.Listbox(list_frame, width=38, exportselection=False)
+        self.roster = tk.Listbox(list_frame, width=38, exportselection=False, font=(PROLOGUE_REGULAR, 10))
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.roster.yview)
         self.roster.configure(yscrollcommand=scroll.set)
         self.roster.pack(side="left", fill="both", expand=True)
@@ -787,9 +807,9 @@ class SoldierEditor(tk.Tk):
         portrait = tk.Frame(portrait_column, bg="#11120f", width=230, height=230, highlightbackground="#77776b", highlightthickness=2)
         portrait.pack(anchor="nw")
         portrait.grid_propagate(False)
-        self.portrait_text = tk.Label(portrait, text="PORTRAIT", bg="#11120f", fg="#dad8c3", font=("Segoe UI", 18), justify="center")
+        self.portrait_text = tk.Label(portrait, text="PORTRAIT", bg="#11120f", fg="#dad8c3", font=(PROLOGUE_EXPANDED, 18), justify="center")
         self.portrait_text.place(x=0, y=0, relwidth=1, relheight=1)
-        self.portrait_code = tk.Label(portrait, text="Portrait", bg="#11120f", fg="#dad8c3", font=("Segoe UI", 11), padx=8, pady=3)
+        self.portrait_code = tk.Label(portrait, text="Portrait", bg="#11120f", fg="#dad8c3", font=(PROLOGUE_REGULAR, 11), padx=8, pady=3)
         self.portrait_code.place(relx=.5, rely=1, anchor="s")
 
         # Keep the tag in the portrait's own column. A shared card grid row is
@@ -807,7 +827,7 @@ class SoldierEditor(tk.Tk):
         self.sex_var = tk.StringVar()
         self.condition_var = tk.StringVar(value="Normal")
         self.description_var = tk.StringVar()
-        ttk.Entry(identity, textvariable=self.name_var, width=28, font=("Segoe UI", 18)).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Entry(identity, textvariable=self.name_var, width=28, font=(PROLOGUE_EXPANDED, 18)).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(identity, text="Assignment", style="PW.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.assignment_box = ttk.Combobox(identity, textvariable=self.assignment_var, width=20, state="readonly")
         self.assignment_box.grid(row=2, column=0, sticky="w")
@@ -856,14 +876,14 @@ class SoldierEditor(tk.Tk):
         self.morale_var.trace_add("write", lambda *_args: self._cap_relation_stat(self.morale_var))
         for row, (label, variable) in enumerate((("LIFE", self.life_var), ("PSYCHE", self.psyche_var))):
             tk.Label(stats, text=label, bg=RED, fg="white", width=10, anchor="w", padx=7,
-                     font=("Segoe UI", 11, "bold")).grid(row=row, column=0, sticky="ew", pady=1)
+                     font=(PROLOGUE_EXPANDED, 11)).grid(row=row, column=0, sticky="ew", pady=1)
             ttk.Entry(stats, textvariable=variable, width=9, justify="right").grid(row=row, column=1, padx=(2, 12), pady=1)
-        tk.Label(stats, text="STORED BASE GMP+", bg=PANEL, fg=CREAM, font=("Segoe UI", 10, "bold")).grid(row=0, column=2)
+        tk.Label(stats, text="STORED BASE GMP+", bg=PANEL, fg=CREAM, font=(PROLOGUE_EXPANDED, 10)).grid(row=0, column=2)
         ttk.Entry(stats, textvariable=self.gmp_var, width=10, justify="right").grid(row=1, column=2)
         for column, (label, variable) in enumerate(
             (("HOSTILITY", self.hostility_var), ("MORALE", self.morale_var)), start=3
         ):
-            tk.Label(stats, text=label, bg=PANEL, fg=CREAM, font=("Segoe UI", 10, "bold")).grid(
+            tk.Label(stats, text=label, bg=PANEL, fg=CREAM, font=(PROLOGUE_EXPANDED, 10)).grid(
                 row=0, column=column, padx=(14, 0)
             )
             ttk.Entry(stats, textvariable=variable, width=8, justify="right").grid(
@@ -890,7 +910,7 @@ class SoldierEditor(tk.Tk):
 
         skills = tk.Frame(right, bg=PANEL, padx=10, pady=10)
         skills.pack(fill="x", pady=(14, 0))
-        tk.Label(skills, text="SKILLS", bg=PANEL, fg=CREAM, font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        tk.Label(skills, text="SKILLS", bg=PANEL, fg=CREAM, font=(PROLOGUE_EXPANDED, 14)).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
         self.skill_vars = [tk.StringVar() for _ in range(VISIBLE_SKILLS)]
         for index, variable in enumerate(self.skill_vars):
             box = ttk.Combobox(skills, textvariable=variable, values=SKILL_CHOICES, state="readonly", width=34)
@@ -905,7 +925,7 @@ class SoldierEditor(tk.Tk):
             textvariable=self.skill_description_var,
             bg="#1f211e",
             fg=CREAM,
-            font=("Segoe UI", 10),
+            font=(PROLOGUE_REGULAR, 10),
             justify="left",
             anchor="nw",
             padx=10,
@@ -923,7 +943,7 @@ class SoldierEditor(tk.Tk):
             text="CUSTOM QUOTE (OPTIONAL)",
             bg=PANEL,
             fg=CREAM,
-            font=("Segoe UI", 14, "bold"),
+            font=(PROLOGUE_EXPANDED, 14),
         ).pack(anchor="w", pady=(0, 6))
         template_row = tk.Frame(custom_quotes, bg=PANEL)
         template_row.pack(fill="x", pady=(0, 6))
@@ -959,7 +979,7 @@ class SoldierEditor(tk.Tk):
             text="Stored beside the save and loaded automatically by the optional Custom Quote plugin.",
             bg=PANEL,
             fg=CREAM,
-            font=("Segoe UI", 9),
+            font=(PROLOGUE_REGULAR, 9),
             anchor="w",
         ).pack(fill="x", pady=(3, 0))
         ttk.Button(custom_quotes, text="APPLY SOLDIER CHANGES", style="PW.TButton", command=self.apply_fields).pack(anchor="w", pady=(8, 0))
@@ -1151,7 +1171,7 @@ class SoldierEditor(tk.Tk):
         panel = tk.Frame(parent, bg=RED, padx=5, pady=4)
         panel.grid(row=0, column=column, sticky="ew", padx=(0, 3))
         parent.columnconfigure(column, weight=1)
-        tk.Label(panel, text=label, bg=RED, fg="white", font=("Segoe UI", 9, "bold")).pack()
+        tk.Label(panel, text=label, bg=RED, fg="white", font=(PROLOGUE_EXPANDED, 9)).pack()
         box = ttk.Combobox(panel, textvariable=variable, values=GRADE_CHOICES, state="readonly", width=10)
         box.pack(fill="x")
         if callback:
@@ -1162,7 +1182,7 @@ class SoldierEditor(tk.Tk):
         panel = tk.Frame(parent, bg=RED, padx=5, pady=4)
         panel.grid(row=0, column=column, sticky="ew", padx=(0, 3))
         parent.columnconfigure(column, weight=1)
-        tk.Label(panel, text=label, bg=RED, fg="white", font=("Segoe UI", 9, "bold")).pack()
+        tk.Label(panel, text=label, bg=RED, fg="white", font=(PROLOGUE_EXPANDED, 9)).pack()
         row = tk.Frame(panel, bg=RED)
         row.pack(fill="x")
         if battle_name is None:
@@ -1191,7 +1211,7 @@ class SoldierEditor(tk.Tk):
         panel = tk.Frame(parent, bg=RED, padx=5, pady=4)
         panel.grid(row=0, column=column, sticky="ew", padx=(0, 3))
         parent.columnconfigure(column, weight=1)
-        tk.Label(panel, text=label, bg=RED, fg="white", font=("Segoe UI", 9, "bold")).pack()
+        tk.Label(panel, text=label, bg=RED, fg="white", font=(PROLOGUE_EXPANDED, 9)).pack()
         row = tk.Frame(panel, bg=RED)
         row.pack(fill="x")
         rank = ttk.Combobox(row, textvariable=rank_variable, values=RANK_CHOICES + ["-"],

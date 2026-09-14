@@ -24,6 +24,9 @@ class Mesh:
     uvs: list[tuple[float, float]] = field(default_factory=list)
     triangles: list[tuple[int, int, int]] = field(default_factory=list)
     materials: list[int] = field(default_factory=list)
+    vertex_position_offsets: list[int] = field(default_factory=list)
+    bind_translations: list[tuple[float, float, float]] = field(default_factory=list)
+    material_colors: list[tuple[int, int, int, int]] = field(default_factory=list)
     visible: bool = True
 
 
@@ -33,6 +36,8 @@ class Model:
     bones: list[Bone]
     meshes: list[Mesh]
     texture_hashes: set[int]
+    source_data: bytes
+    position_scale: float
 
     @property
     def triangle_count(self) -> int:
@@ -56,6 +61,26 @@ VERTEX_LAYOUTS = {
 def _check_range(data: bytes, offset: int, size: int, label: str) -> None:
     if offset < 0 or size < 0 or offset + size > len(data):
         raise ValueError(f"{label} points outside the MDP file")
+
+
+def _combine_meshes(meshes: list[Mesh], name: str) -> list[Mesh]:
+    """Present an MDP as one editable object without losing save locations."""
+    if len(meshes) <= 1:
+        return meshes
+    combined = Mesh(name=name)
+    for mesh in meshes:
+        vertex_base = len(combined.vertices)
+        combined.vertices.extend(mesh.vertices)
+        combined.uvs.extend(mesh.uvs)
+        combined.vertex_position_offsets.extend(mesh.vertex_position_offsets)
+        combined.bind_translations.extend(mesh.bind_translations)
+        combined.triangles.extend(
+            (a + vertex_base, b + vertex_base, c + vertex_base)
+            for a, b, c in mesh.triangles
+        )
+        combined.materials.extend(mesh.materials)
+        combined.material_colors.extend(mesh.material_colors)
+    return [combined]
 
 
 def load_mdp(path: Path) -> Model:
@@ -114,15 +139,17 @@ def load_mdp(path: Path) -> Model:
             skin_bones = list(data[skin_offset + 4:skin_offset + 4 + skin_count])
 
         vertices, uvs = [], []
+        vertex_position_offsets = []
+        bind_translations = []
         for vertex_index in range(vertex_count):
             base = vertex_offset + vertex_index * stride
             u, v = struct.unpack_from("<HH", data, base + uv_offset)
             x, y, z = struct.unpack_from("<hhh", data, base + position_offset)
             position = [x / scale, y / scale, z / scale]
+            translation = [0.0, 0.0, 0.0]
             if weight_count and skin_bones:
                 weights = data[base:base + weight_count]
                 total = sum(weights) or 128
-                translation = [0.0, 0.0, 0.0]
                 for weight_index, weight in enumerate(weights):
                     if weight_index >= len(skin_bones) or skin_bones[weight_index] >= len(bones):
                         continue
@@ -133,8 +160,10 @@ def load_mdp(path: Path) -> Model:
                 position = [position[axis] + translation[axis] for axis in range(3)]
             vertices.append(tuple(position))
             uvs.append((u / 4096.0, 1.0 - v / 4096.0))
+            vertex_position_offsets.append(base + position_offset)
+            bind_translations.append(tuple(translation))
 
-        triangles, materials = [], []
+        triangles, materials, material_colors = [], [], []
         _check_range(data, face_offset, face_count * face_stride, f"Mesh {mesh_index} face table")
         cursor = 0
         for face_index in range(face_count):
@@ -148,8 +177,10 @@ def load_mdp(path: Path) -> Model:
             if material_offset and material_offset + 24 <= len(data):
                 texture_hash = u32(data, material_offset)
                 texture_hashes.add(texture_hash)
+                material_color = tuple(data[material_offset + 16:material_offset + 20])
             else:
                 texture_hash = 0
+                material_color = (255, 255, 255, 255)
             for strip_index in range(max(0, strip_size - 2)):
                 a, b, c = cursor + strip_index, cursor + strip_index + 1, cursor + strip_index + 2
                 if strip_index & 1:
@@ -157,16 +188,43 @@ def load_mdp(path: Path) -> Model:
                 if c < len(vertices):
                     triangles.append((a, b, c))
                     materials.append(texture_hash)
+                    material_colors.append(material_color)
             cursor += strip_size
-        meshes.append(Mesh(f"{name_hash:08x}", vertices, uvs, triangles, materials))
+        meshes.append(Mesh(
+            f"{name_hash:08x}", vertices, uvs, triangles, materials,
+            vertex_position_offsets, bind_translations, material_colors,
+        ))
     if not meshes:
         if pc_layout:
             raise ValueError(
-                "This is a metadata-only MDPX copy with no vertex buffers. "
-                "Open another extracted copy of the same model hash."
+                "This MDPX contains stage placement and material metadata only; "
+                "its vertex and face-buffer pointers are empty. The visible geometry "
+                "is stored in a separate stage resource and cannot yet be displayed."
             )
         raise ValueError("The MDP has no conventional vertex buffers to display")
-    return Model(path, bones, meshes, texture_hashes)
+    meshes = _combine_meshes(meshes, path.stem)
+    return Model(path, bones, meshes, texture_hashes, data, scale)
+
+
+def save_mdp(model: Model, destination: Path) -> None:
+    """Write edited vertex positions while preserving the original container."""
+    data = bytearray(model.source_data)
+    for mesh in model.meshes:
+        if len(mesh.vertices) != len(mesh.vertex_position_offsets):
+            raise ValueError(f"Mesh {mesh.name} no longer has its original vertex count")
+        for vertex, offset, translation in zip(
+            mesh.vertices, mesh.vertex_position_offsets, mesh.bind_translations
+        ):
+            packed = []
+            for axis in range(3):
+                value = round((vertex[axis] - translation[axis]) * model.position_scale)
+                if value < -32768 or value > 32767:
+                    raise ValueError(
+                        f"Mesh {mesh.name} has a vertex outside the MDP 16-bit position range"
+                    )
+                packed.append(value)
+            struct.pack_into("<hhh", data, offset, *packed)
+    destination.write_bytes(data)
 
 
 def export_obj(model: Model, destination: Path) -> None:

@@ -7,6 +7,7 @@ datas = [
     (str(project_dir / "portrait_assets"), "portrait_assets"),
     (str(project_dir / "staff_tag_assets"), "staff_tag_assets"),
     (str(project_dir / "quote_assets"), "quote_assets"),
+    (str(project_dir / "font_assets"), "font_assets"),
 ]
 
 voice_previews = project_dir / "voice_previews"

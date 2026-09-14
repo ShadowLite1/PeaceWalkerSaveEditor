@@ -100,11 +100,21 @@ def load_mtar(path: Path) -> MotionArchive:
 
 def quaternion_at(keys, frame):
     if not keys: return (0.0, 0.0, 0.0, 1.0)
-    previous = keys[0][1]
-    for key_frame, quat in keys:
-        if key_frame > frame: break
-        previous = quat
-    return previous
+    if frame <= keys[0][0]: return keys[0][1]
+    for index in range(1, len(keys)):
+        next_frame, following = keys[index]
+        if next_frame > frame:
+            previous_frame, previous = keys[index - 1]
+            span = max(1.0, float(next_frame - previous_frame))
+            amount = max(0.0, min(1.0, (frame - previous_frame) / span))
+            # Normalized linear interpolation is stable for the small angular
+            # differences between adjacent motion keys and avoids visible steps.
+            if sum(a * b for a, b in zip(previous, following)) < 0:
+                following = tuple(-value for value in following)
+            blended = tuple(a + (b - a) * amount for a, b in zip(previous, following))
+            length = math.sqrt(sum(value * value for value in blended)) or 1.0
+            return tuple(value / length for value in blended)
+    return keys[-1][1]
 
 
 def rotate_vector(point, quat):
